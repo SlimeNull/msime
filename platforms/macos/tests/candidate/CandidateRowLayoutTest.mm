@@ -1215,6 +1215,58 @@ selected_bar = "#77ccee"
     std::filesystem::remove_all(root);
 }
 
+static void TestUserPaddingSelectedBar()
+{
+    char temporary[] = "/tmp/msime-padding-selected-bar-XXXXXX";
+    assert(mkdtemp(temporary));
+    const std::filesystem::path root(temporary);
+    std::filesystem::create_directory(root / "bar");
+    {
+        std::ofstream manifest(root / "bar" / "skin.toml");
+        manifest << "schema_version = 2\nid = \"bar\"\nname = \"Synthetic Selected Bar\"\nversion = \"1\"\nbase = \"system\"\n"
+                 << "[supports]\nlayouts = [\"horizontal\", \"vertical\"]\nthemes = [\"light\", \"dark\"]\n"
+                 << "[candidate.light]\nshow_selected_bar = true\n[candidate.dark]\nshow_selected_bar = true\n";
+        assert(manifest.good());
+    }
+    NSString *suite = [@"app.msime.test.padding-selected-bar." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    [defaults setObject:@"custom" forKey:@"MSIMEClientGlobalTheme"];
+    [defaults setObject:@"bar" forKey:@"MSIMEClientCustomCandidateSkin"];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults
+        skinsRoot:[NSURL fileURLWithPath:@(root.c_str()) isDirectory:YES]];
+    appearance.themeMode = @"light";
+    appearance.showsCandidatePreedit = NO;
+    appearance.showsAppLogo = NO;
+    MSIMEInputController *controller = [[MSIMEInputController alloc] init];
+    RowLayoutClient *client = [RowLayoutClient new];
+    const NSRect screen = NSScreen.mainScreen.visibleFrame;
+    client.caret = NSMakeRect(NSMidX(screen), NSMidY(screen), 1, 20);
+    RowLayoutPanel *panel = [[RowLayoutPanel alloc] initWithContentRect:NSZeroRect
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:panel forKey:@"panel"];
+    [controller setValue:@{@"focused": @YES, @"editing_text": @"synthetic", @"page": @0, @"page_count": @1,
+        @"candidates": @[@{@"text": @"合成", @"highlighted": @YES}]} forKey:@"view"];
+    for (NSNumber *percent in @[@50, @100, @150, @200]) for (NSNumber *vertical in @[@NO, @YES]) {
+        [appearance applySharedCandidatePreferences:@{
+            @"candidate_scale_percent": percent, @"candidate_item_padding_horizontal": @8}];
+        appearance.vertical = vertical.boolValue;
+        [controller renderCandidates];
+        MSIMECandidateButton *button = CandidateButton(panel.contentView, 0);
+        const CGFloat scale = percent.doubleValue / 100;
+        assert(button && button.showSelectedBar && button.hasSkinLayout);
+        assert(button.selectedBarInside);
+        assert(fabs(button.textLeftInset - 8 * scale) < 0.01);
+        assert(fabs(button.textRightInset - 8 * scale) < 0.01);
+        const CGFloat barLeft = MAX(1.0, button.selectionLeftInset);
+        assert(barLeft >= 0 && barLeft + button.selectedBarWidth <= NSWidth(button.bounds));
+    }
+    [panel orderOut:nil];
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+    std::filesystem::remove_all(root);
+}
+
 static void TestUserGeometry()
 {
     NSString *suite = [@"app.msime.test.item-geometry." stringByAppendingString:NSUUID.UUID.UUIDString];
@@ -1346,6 +1398,7 @@ int main(int argc, char **argv)
     {
         [NSApplication sharedApplication];
         TestCandidateFillEdges();
+        TestUserPaddingSelectedBar();
         TestUserGeometry();
         if (argc == 2 && std::string(argv[1]) == "--glass-host-visual") { TestHostAppearance(YES); return 0; }
         if (argc == 4 && std::string(argv[1]) == "--canvas-upstream") {

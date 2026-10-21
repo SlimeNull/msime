@@ -985,6 +985,9 @@
     &.wnd-h .candidate-brand-row {
       flex-basis: 100%;
     }
+    .container:has(> .skin-background-image) {
+      overflow: hidden;
+    }
   }
   :is([data-platform="win"]) &[data-preview-theme="light"] {
     --cand-bg: #fffffff7;

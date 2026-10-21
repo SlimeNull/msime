@@ -7259,7 +7259,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     geometry.selectedBarHeight = layout && layout->selectedBarHeightEm
         ? MAX(geometry.selectedBarWidth * 2.0, static_cast<CGFloat>(*layout->selectedBarHeightEm * font.pointSize))
         : 0.0;
-    geometry.selectedBarInside = layout && layout->selectedBarInside.value_or(false);
+    geometry.selectedBarInside = !layout || layout->selectedBarInside.value_or(false);
     return geometry;
 }
 
