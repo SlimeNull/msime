@@ -1089,7 +1089,8 @@ static void TestHostAppearance(BOOL visual)
             assert(glass != nil);
             for (NSNumber *expandedMode in @[@NO, @YES, @NO]) {
                 [controller setValue:expandedMode.boolValue ? expanded : nil forKey:@"expandedCandidates"];
-                [controller renderCandidates];
+                if (expandedMode.boolValue) assert([controller renderExpandedCandidates]);
+                else [controller renderCandidates];
                 assert(panel.contentView == stableChrome);
                 assert(stableContent.clipsToBounds == expandedMode.boolValue);
                 for (NSString *name in @[NSAppearanceNameDarkAqua, NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) {
@@ -1111,7 +1112,8 @@ static void TestHostAppearance(BOOL visual)
                         MSIMECandidateButton *previous = CandidateButton(stableChrome, 1);
                         [controller setValue:nil forKey:@"renderedCandidateView"];
                         if (key == 0) [controller hideCandidatePanel:"empty"];
-                        [controller renderCandidates];
+                        if (expandedMode.boolValue) assert([controller renderExpandedCandidates]);
+                        else [controller renderCandidates];
                         assert(client.attributeReads == reads + key + 1);
                         assert([panel.appearance.name isEqual:NSAppearanceNameAqua]);
                         assert(panel.contentView == stableChrome && stableChrome.candidateContentView == stableContent);
