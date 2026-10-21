@@ -58,6 +58,42 @@ static MSIMECandidateButton *CandidateButton(NSView *content, NSInteger tag)
     return nil;
 }
 
+// 直接检查真实绘制方法的四条直边，布局矩形贴边不能代替背景像素贴边。
+static void TestCandidateFillEdges()
+{
+    for (NSInteger backingScale : {1, 2}) for (BOOL fourCorners : {NO, YES}) for (BOOL selected : {NO, YES}) {
+        MSIMECandidateButton *button = [[MSIMECandidateButton alloc] initWithFrame:NSMakeRect(0, 0, 64, 32)];
+        button.tag = 0;
+        button.title = @"";
+        button.font = [NSFont systemFontOfSize:16];
+        button.cornerRadius = 6;
+        button.hasCornerRadii = fourCorners;
+        button.cornerRadii = {8, 6, 4, 2};
+        button.candidateHighlighted = selected;
+        button.candidateHovered = !selected;
+        button.fillColor = NSColor.redColor;
+        button.hoverColor = NSColor.blueColor;
+        const NSInteger width = 64 * backingScale, height = 32 * backingScale;
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
+            pixelsWide:width pixelsHigh:height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES
+            isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+        assert(bitmap);
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
+        CGContextScaleCTM(NSGraphicsContext.currentContext.CGContext, backingScale, backingScale);
+        [button drawRect:button.bounds];
+        [NSGraphicsContext restoreGraphicsState];
+        for (const NSPoint point : {NSMakePoint(0, height / 2), NSMakePoint(width - 1, height / 2),
+                                   NSMakePoint(width / 2, 0), NSMakePoint(width / 2, height - 1)}) {
+            NSColor *pixel = [[bitmap colorAtX:point.x y:point.y] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            assert(pixel.alphaComponent > 0.99);
+            assert(fabs(pixel.redComponent - (selected ? 1.0 : 0.0)) < 0.05);
+            assert(fabs(pixel.blueComponent - (selected ? 0.0 : 1.0)) < 0.05);
+            assert(pixel.greenComponent < 0.05);
+        }
+    }
+}
+
 static void Spin(NSTimeInterval seconds)
 {
     [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
@@ -214,6 +250,7 @@ stagger_ms = 10
     MSIMECandidateButton *selected = CandidateButton(content, 2);
     assert(selected.candidateHighlighted && !CandidateButton(content, 0).candidateHighlighted);
     assert(motion.selectionLayer != nil && motion.selectionLayer.superlayer == selected.superview.layer && selected.selectionFillDetached);
+    assert(CGRectEqualToRect(motion.selectionLayer.frame, selected.layer.frame));
     assert([motion.selectionLayer animationForKey:@"msime-candidate-selection"] != nil);
     assert([selected.layer animationForKey:@"msime-candidate-selection"] == nil);
     assert([CandidateButton(content, 8).layer animationForKey:@"msime-candidate-row-reveal"] != nil);
@@ -719,7 +756,7 @@ static void TestFactoryCornerRadii(RowLayoutClient *client)
             assert(first && last && first.hasCornerRadii == follow && last.hasCornerRadii == follow);
             CGPathRef path = [first createSelectionFillPath];
             if (!follow) { assert(path == nullptr); continue; }
-            assert(path && CGRectEqualToRect(CGPathGetBoundingBox(path), NSInsetRect(first.bounds, 1, 1)));
+            assert(path && CGRectEqualToRect(CGPathGetBoundingBox(path), first.bounds));
             assert(fabs(first.cornerRadii[0] - (preedit.boolValue ? first.cornerRadius : outer)) < 0.01);
             if (fabs(last.cornerRadii[3] - outer) >= 0.01)
                 fprintf(stderr, "corner geometry skin=%s scale=%.1f vertical=%d preedit=%d expanded=%d area=%s first=%s last=%s radius=%.2f expected=%.2f\n",
@@ -1241,6 +1278,31 @@ static void TestUserGeometry()
             MSIMECandidateButton *padded = CandidateButton(panel.contentView, 0);
             assert(fabs(padded.itemLayout.contentTop - 7 * scale) < 0.01);
             assert(fabs(padded.itemLayout.height - first.itemLayout.height - 10 * scale) < 0.01);
+            document[@"candidate_padding_horizontal"] = @0;
+            document[@"candidate_padding_vertical"] = @0;
+            [appearance applySharedCandidatePreferences:document];
+            [controller renderCandidates];
+            assert(fabs(NSMinX(CandidateButton(panel.contentView, 0).frame)) < 0.01);
+            assert(fabs(NSMinY(((MSIMECandidateChromeView *)panel.contentView).candidateRowsRect)) < 0.01);
+            const CGFloat flushHeight = NSHeight(panel.contentView.frame);
+            [document removeObjectForKey:@"candidate_item_corner_radius"];
+            [appearance applySharedCandidatePreferences:document];
+            [controller renderCandidates];
+            chrome = (id)panel.contentView;
+            [chrome layoutSubtreeIfNeeded];
+            assert(![appearance candidateWindowSkinForDark:NO].tokens.explicitItemRadius);
+            assert(chrome.clipsCandidateContent && chrome.candidateContentView.layer.mask);
+            CAShapeLayer *mask = (id)chrome.candidateContentView.layer.mask;
+            const CGFloat halfBorder = MAX(0.0, chrome.lineWidth) / 2;
+            assert(CGRectEqualToRect(CGPathGetBoundingBox(mask.path),
+                NSInsetRect(chrome.candidateContentView.bounds, halfBorder, halfBorder)));
+            document[@"candidate_padding_horizontal"] = @1;
+            document[@"candidate_padding_vertical"] = @1;
+            [appearance applySharedCandidatePreferences:document];
+            [controller renderCandidates];
+            assert(fabs(NSMinX(CandidateButton(panel.contentView, 0).frame) - scale) < 0.01);
+            assert(fabs(NSHeight(panel.contentView.frame) - flushHeight - 2 * scale) < 0.01);
+            assert(!((MSIMECandidateChromeView *)panel.contentView).clipsCandidateContent);
         }
     }
     {
@@ -1283,6 +1345,7 @@ int main(int argc, char **argv)
     @autoreleasepool
     {
         [NSApplication sharedApplication];
+        TestCandidateFillEdges();
         TestUserGeometry();
         if (argc == 2 && std::string(argv[1]) == "--glass-host-visual") { TestHostAppearance(YES); return 0; }
         if (argc == 4 && std::string(argv[1]) == "--canvas-upstream") {
@@ -1688,7 +1751,7 @@ int main(int argc, char **argv)
             std::sort(timings.begin(), timings.end());
             printf("candidate show/hide: median=%.3fms p95=%.3fms\n", timings[30], timings[57]);
         }
-        // 首选与悬停行按相同内边距推导圆角，覆盖极端设置和缩放。内边距 0 时窗口只留 1pt 细边框的宽度（#7974），边框不随缩放变粗，所以各档缩放都只扣 1pt。
+        // 首选与悬停行按相同内边距推导圆角；零内边距在各档缩放下都不受边框宽度限制。
         appearance.candidateCornerRadius = @32;
         appearance.candidatePadding = @0;
         for (NSNumber *scale in @[@50, @100, @150, @200]) {
@@ -1697,9 +1760,9 @@ int main(int argc, char **argv)
             MSIMECandidateButton *selected = CandidateButton(panel.contentView, 0);
             MSIMECandidateButton *hovered = CandidateButton(panel.contentView, 1);
             hovered.candidateHovered = YES;
-            assert(selected.cornerRadius == 32.0 * scale.doubleValue / 100.0 - 1.0);
+            assert(selected.cornerRadius == 32.0 * scale.doubleValue / 100.0);
             assert(hovered.cornerRadius == selected.cornerRadius);
-            assert(std::abs(NSMinX(selected.frame) - 1.0) < 0.001);
+            assert(std::abs(NSMinX(selected.frame)) < 0.001);
         }
         // 前一组覆盖到 200% 缩放，首行布局断言使用 100% 的坐标。
         appearance.candidateScalePercent = 100;

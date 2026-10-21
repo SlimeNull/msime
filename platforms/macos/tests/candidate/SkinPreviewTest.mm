@@ -317,13 +317,13 @@ static void TestCandidateWindowStyle(MSIMEAppearancePreferences *preferences, NS
         }
         [preferences applySharedCandidatePreferences:@{@"candidate_padding": @0}];
         assert([preferences.candidatePadding isEqual:@0]);
-        // 0pt 仍留出 1pt 细边框的宽度（#7974），所以 1pt 和 0pt 一样高，16pt 比它多 2 × 15pt 而不是 2 × 16pt。
+        // 零内边距不再保留边框下限；1pt 和 16pt 分别增加两侧对应的留白。
         const CGFloat minimumPaddingHeight = preview.previewContentHeight;
         preferences.candidatePadding = @1;
-        assert(std::abs(preview.previewContentHeight - minimumPaddingHeight) < .01);
+        assert(std::abs(preview.previewContentHeight - minimumPaddingHeight - 2.0 * preferences.candidateScalePercent / 100.0) < .01);
         preferences.candidatePadding = @16;
-        assert(std::abs(preview.previewContentHeight - minimumPaddingHeight - 2.0 * (16.0 * preferences.candidateScalePercent / 100.0 - 1.0)) < .01);
-        // 先缩放内边距、再保留固定 1pt 边框；横排、竖排和双布局预览的高度都按真实窗口计算。
+        assert(std::abs(preview.previewContentHeight - minimumPaddingHeight - 2.0 * 16.0 * preferences.candidateScalePercent / 100.0) < .01);
+        // 内边距按整体大小缩放；横排、竖排和双布局预览的高度都按真实窗口计算。
         const NSInteger previousScale = preferences.candidateScalePercent;
         const BOOL previousVertical = preferences.vertical;
         for (NSNumber *percent in @[@50, @100, @150, @200]) {
@@ -342,7 +342,7 @@ static void TestCandidateWindowStyle(MSIMEAppearancePreferences *preferences, NS
                     assert(std::abs(drawing.tokens.selectedRadius * factor - actual.tokens.selectedRadius) < .001);
                     preferences.candidatePadding = @16;
                     const CGFloat panels = showcase.boolValue ? 2.0 : 1.0;
-                    const CGFloat expected = 2.0 * panels * (16.0 * percent.doubleValue / 100.0 - 1.0);
+                    const CGFloat expected = 2.0 * panels * 16.0 * percent.doubleValue / 100.0;
                     assert(std::abs(preview.previewContentHeight - tightHeight - expected) < .01);
                 }
             }

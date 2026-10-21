@@ -435,6 +435,13 @@ test("the preview style carries the scale, the opacity and a set radius only", (
   });
 });
 
+test.each([0, 4, 16])("候选项间距 %s 只改变间隔，不改变跟随皮肤时的行外边距", (spacing) => {
+  expect(candidateWindowStyle({ candidate_item_spacing: spacing })).toEqual({
+    ...candidateWindowStyle({}),
+    "--msime-candidate-item-spacing": `${spacing}px`,
+  });
+});
+
 test("分轴窗口留白与候选项几何分别显示并允许显式零值", () => {
   const { onChange } = renderSection({
     showPadding: true,

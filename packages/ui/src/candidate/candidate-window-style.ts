@@ -10,7 +10,7 @@ export const candidateScaleSlider = { min: 75, max: 150, step: 5 } as const;
 export const candidateOpacitySlider = { min: 50, max: 100, step: 5 } as const;
 /** The core accepts up to 32 like a skin package's `corner_radius_dip`; the slider stops at 16, past which a card reads as a pill. */
 export const candidateCornerRadiusSlider = { min: 0, max: 16, step: 1 } as const;
-/** 覆盖核心接受的整个 0–16（#7974）。macOS 卡片在选中高亮和边缘之间至少留出边框的宽度，默认 1pt 细边框下 0 和 1 画出来一样，无边框的皮肤可以让候选行贴边。 */
+/** 覆盖核心接受的整个 0–16；macOS 的零内边距直接贴边，不受边框宽度限制。 */
 export const candidateCardPaddingSlider = { min: 0, max: 16, step: 1 } as const;
 
 export const candidateGeometryFields = [
@@ -112,9 +112,6 @@ export function candidateWindowStyle(preferences: CandidateWindowStylePreference
   if (candidateCardPadding(preferences.candidate_item_padding_horizontal) !== null) {
     geometry["--msime-candidate-preview-text-pad-left"] = "0px";
     geometry["--msime-candidate-preview-text-pad-right"] = "0px";
-  }
-  if (candidateCardPadding(preferences.candidate_item_spacing) !== null) {
-    geometry["--msime-candidate-preview-row-margin"] = "0px";
   }
   if (candidateCornerRadius(preferences.candidate_item_corner_radius) !== null) {
     geometry["--msime-candidate-content-overflow"] = "hidden";

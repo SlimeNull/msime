@@ -292,7 +292,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 - (CGPathRef)createSelectionFillPath
 {
     if (!self.hasCornerRadii) return nullptr;
-    return MSIMECreateCandidateCornerPath(NSInsetRect(self.bounds, 1, 1), self.cornerRadii, self.isFlipped);
+    return MSIMECreateCandidateCornerPath(self.bounds, self.cornerRadii, self.isFlipped);
 }
 - (void)drawRect:(NSRect)dirtyRect
 {
@@ -312,7 +312,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
             CGContextFillPath(context);
             CGPathRelease(path);
         } else {
-            [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 1, 1) xRadius:self.cornerRadius yRadius:self.cornerRadius] fill];
+            [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:self.cornerRadius yRadius:self.cornerRadius] fill];
         }
     }
     if (self.candidateHighlighted && self.showSelectedBar)

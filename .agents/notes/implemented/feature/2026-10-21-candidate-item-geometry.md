@@ -14,7 +14,7 @@ Status: implemented
 
 ## Historical audit
 
-- [旧内边距与圆角保护](../../implemented/bug-fix/2026-10-15-macos-candidate-padding-below-2pt.md)部分重叠：保留边框下限和缺省圆角推导，显式候选项圆角不再受联动影响。
+- [旧内边距与圆角保护](../../implemented/bug-fix/2026-10-15-macos-candidate-padding-below-2pt.md)部分重叠：保留缺省圆角推导，显式候选项圆角不再受联动影响；边框下限由[零窗口内边距](../simplification/2026-10-21-macos-zero-window-padding.md)取代。
 - [共享出厂版式](../../implemented/feature/2026-10-20-skin-factory-layout.md)部分重叠：皮肤几何保持原样，用户配置在其上覆盖，不改皮肤清单。
 - [候选偏好叶子契约](../../implemented/simplification/2026-10-15-candidate-preferences.md)持有类型归属，继续复用。
 
@@ -28,6 +28,10 @@ Status: implemented
 
 两种内边距均可分轴配置，窗口和候选项的圆角及间距可以独立调整。缺省不迁移、不改默认几何；代价是保留旧的统一内边距字段与逐轴兼容回退。显式候选项垂直内边距包住所有文字行，测量、绘制与命中使用相同候选矩形。展开网格的行距同时进入视口高度、滚动步长与按钮位置。
 
+macOS 共享预览的候选行不保留旧版 `.row` 的上下外边距：候选间距只放在相邻项之间，窗口边缘留白只由窗口内边距决定。跟随皮肤和显式设置间距使用同样的零行外边距，避免恢复跟随时横排预览突然增高；其他宿主的预览规则保持原样。
+
+横排候选容器采用可折行的 flex 布局，不依赖 `inline-block` 的行框基线，避免零留白时卡片底部仍有字体下降部空间。拼音或品牌首行独占整行；窗口内边距、相邻项间距与折行仍由原有几何控制。系统主题的 Web 预览没有 AppKit 材质，使用半透明系统灰 `#8e8e9380` 补出 1px 轮廓；自定义主题仍使用其边框调色板，不改实际候选窗口。
+
 卡片装饰与 canvas 不属于候选内容，遮罩只作用于普通窗口和网格的内容容器，不裁剪外部装饰和自由挂件。AppKit 回退保存整份共享文档时显式保留新字段，缺省与恢复写为 `null` 后交给 Rust 序列化省略。
 
 ## Testing
@@ -35,5 +39,7 @@ Status: implemented
 - `CARGO_TARGET_DIR=target/macos-cargo cargo test -p msime-client-core candidate_ --locked`：34 项通过，包含字段缺省、零值、边界、非法类型、恢复、落盘往返和宿主能力声明。
 - macOS 的 `candidate-skin`、`candidate-item-layout`、`candidate-row-layout`、`skin-preview`、`candidate-panel` 五项 CTest 通过。产品控制器测试覆盖 50/100/150/200% 缩放、横竖排、逐轴窗口高度、行内边距、独立零圆角与内容遮罩，以及展开网格的行距。共享排版测试覆盖折行与释义的上下留白。
 - 前端覆盖控件边界、逐轴旧值拆分与恢复、显式零值和 CSS token；类型检查、生产构建和相关文件 lint 通过。扩大的设置页测试中三项曾超时，隔离重跑三项全部通过。
+- 候选间距恢复跟随皮肤的回归覆盖样式隔离与零行外边距，三个定向前端文件共 51 项通过。浏览器加载生产 CSS 测量横排预览，跟随皮肤与显式 0/4/8/16px 的上下边缘距离、卡片高度一致，项间距离分别为 0/0/4/8/16px。
+- 零几何预览的浏览器回归加载生产 CSS：横竖排 × 明暗 × 12/24/40px 字号的 12 组样例，上下边缘均只保留 1px 边框；24px 横排卡片从 35.5px 收紧到 32px（候选项 30px + 两侧边框），不再有 3.5px 基线空白。拼音和品牌首行、窄窗口折行、8px 内边距、4px 项间距以及自定义主题边框保留均另行验证。
 - macOS 产品 `MSIMEClientInputMethod` 和全部原生目标使用完整 Xcode 工具链构建通过。按用户要求安装本机签名的原生输入法及包含新前端的配置软件，开发包保留内置语音运行库。输入源检查确认双拼模式可选；已运行核心的 Mach-O UUID 与本次构建一致；通过无障碍树确认配置窗口实际显示六项新控件，使用合成全拼输入验证已安装引擎返回预期候选。未向用户正在编辑的文档发送按键，不宣称完成真实编辑器验收。
 - 使用 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` 运行本地 quick 门禁，Rust workspace、macOS 和共享 Apple bridge 编译通过；唯一失败项是 Android Java 阶段缺 API 35。其他未配置的平台由门禁跳过，不构成已验证。默认 CommandLineTools 的 SwiftUI 宏插件不可用，不能代替完整 Xcode 验证该产品。

@@ -8181,7 +8181,8 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     // tokens.radius is the user's radius when one is set, else the package's card radius when it sets one, at the window's scale.
     content.cornerRadius = tokens.radius;
     content.lineWidth = tokens.borderWidth;
-    content.clipsCandidateContent = tokens.explicitItemRadius;
+    content.clipsCandidateContent = tokens.explicitItemRadius ||
+        std::min(msime::mac::CandidateInset(tokens), msime::mac::CandidateVerticalInset(tokens)) < std::max(0.0f, tokens.borderWidth) / 2.0f;
     content.needsLayout = YES;
     // Only in a mode whose resolution draws the package: one that supports a single mode draws no background in the other.
     content.backgroundImage = skin.backgroundPath.empty() ? nil : [_appearance backgroundImageForDark:dark];
