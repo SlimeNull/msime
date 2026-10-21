@@ -1365,9 +1365,15 @@ static void TestUserPaddingSelectedBar()
         std::ofstream manifest(root / "bar" / "skin.toml");
         manifest << "schema_version = 2\nid = \"bar\"\nname = \"Synthetic Selected Bar\"\nversion = \"1\"\nbase = \"system\"\n"
                  << "[supports]\nlayouts = [\"horizontal\", \"vertical\"]\nthemes = [\"light\", \"dark\"]\n"
+                 << "[candidate_window]\nmin_width_dip = 0\n"
                  << "[candidate.light]\nshow_selected_bar = true\n[candidate.dark]\nshow_selected_bar = true\n";
         assert(manifest.good());
     }
+    std::string loadError;
+    const auto package = msime::mac::LoadSkinPackage(root, "bar", &loadError);
+    if (!package) NSLog(@"Synthetic selected bar skin failed to load: %s", loadError.c_str());
+    assert(package && package->light.showSelectedBar == true && package->dark.showSelectedBar == true);
+    assert(!package->resolvedLayout);
     NSString *suite = [@"app.msime.test.padding-selected-bar." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
     [defaults setObject:@"custom" forKey:@"MSIMEClientGlobalTheme"];
@@ -1393,7 +1399,8 @@ static void TestUserPaddingSelectedBar()
             @"global_theme": @"custom",
             @"custom_theme": @{@"base": @"system", @"candidate_skin": @"bar"},
             @"candidate_scale_percent": percent, @"candidate_item_padding_horizontal": @8}];
-        assert([appearance candidateWindowSkinForDark:NO].tokens.showSelectedBar);
+        const auto skin = [appearance candidateWindowSkinForDark:NO];
+        assert(skin.candidateSkin == "bar" && skin.tokens.showSelectedBar && !skin.layout);
         appearance.vertical = vertical.boolValue;
         [controller renderCandidates];
         MSIMECandidateButton *button = CandidateButton(panel.contentView, 0);
