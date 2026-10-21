@@ -41,6 +41,44 @@ static bool SameTokens(const msime::mac::SkinTokens &left, const msime::mac::Ski
            left.showSelectedBar == right.showSelectedBar;
 }
 int main() {
+    {
+        msime::mac::ResolvedSkin skin;
+        skin.tokens = NativeCandidateTokens(false);
+        msime::mac::CandidateWindowStyle style;
+        style.padding = 7;
+        style.paddingHorizontal = 0;
+        style.paddingVertical = 12;
+        style.cornerRadius = 20;
+        style.itemCornerRadius = 0;
+        style.itemPaddingHorizontal = 3;
+        style.itemPaddingVertical = 2;
+        style.itemSpacing = 5;
+        for (double scale : {0.5, 1.0, 1.5, 2.0}) {
+            style.scale = scale;
+            auto resolved = msime::mac::StyledCandidateSkin(skin, style);
+            assert(msime::mac::CandidateInset(resolved.tokens) == 1);
+            assert(msime::mac::CandidateVerticalInset(resolved.tokens) == 12 * scale);
+            assert(resolved.tokens.radius == 20 * scale);
+            assert(resolved.tokens.candidateRadius == 0 && resolved.tokens.selectedRadius == 0);
+            assert(resolved.tokens.explicitItemRadius);
+            assert(*resolved.tokens.itemPaddingHorizontal == 3 * scale);
+            assert(*resolved.tokens.itemPaddingVertical == 2 * scale);
+            assert(*resolved.tokens.itemSpacing == 5 * scale);
+            style.cornerRadius = 32;
+            resolved = msime::mac::StyledCandidateSkin(skin, style);
+            assert(resolved.tokens.candidateRadius == 0);
+            style.cornerRadius = 20;
+        }
+        style.scale = 1;
+        style.paddingHorizontal.reset();
+        assert(msime::mac::CandidateInset(msime::mac::StyledCandidateSkin(skin, style).tokens) == 7);
+        skin.canvas = msime::mac::SkinCanvas{};
+        skin.canvas->content = msime::mac::SkinInsets{8, 9, 10, 11};
+        style.paddingHorizontal = 3;
+        const auto canvas = msime::mac::StyledCandidateSkin(skin, style);
+        const auto content = msime::mac::CanvasContentInsets(*canvas.canvas, 3, 12);
+        assert(content.left == 3 && content.right == 3 && content.top == 12 && content.bottom == 12);
+    }
     // 选中行的释义色：不透明的选中底色上按底色挑白或近黑、0.82 不透明度，和底色的对比度至少 3:1（释义和读音同色，读音不再减淡）；半透明底色上就是皮肤的释义色；皮肤没有释义色时没有它，指定了就不推导。
     {
         struct Case { unsigned selected, translation, text; bool unreadable; };

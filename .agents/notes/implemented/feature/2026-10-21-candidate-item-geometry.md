@@ -1,0 +1,39 @@
+# Agent Note: macOS 候选窗口与候选项独立几何
+
+Status: implemented
+
+## Problem
+
+候选窗只有统一的窗口内边距，无法分别控制水平和垂直留白，也无法配置候选项内部留白、独立圆角和间距。调整窗口圆角还会联动候选项圆角，无法复现紧凑的系统输入法样式。
+
+## Decision
+
+共享偏好新增窗口水平、垂直内边距，候选项水平、垂直内边距、圆角与间距。内边距和间距取 0–16pt，候选项圆角取 0–32pt，零是有效覆盖。窗口分轴值缺省时沿用旧 `candidate_padding`，再沿用皮肤和宿主；所有新字段缺省时不改变现有布局。显式候选项圆角优先于窗口圆角的联动，内容沿卡片内轮廓裁剪而不修改用户圆角。所有长度随整体大小缩放，边框不缩放。
+
+本次实现 macOS，能力声明只在该宿主开启。React 设置页拆分窗口的两轴留白，保留其他宿主原有的统一内边距。AppKit 回退设置不增加控件，但读写、通知和预览消费新字段。普通窗口、展开网格、旧面板、共享预览和原生预览使用同一语义。
+
+## Historical audit
+
+- [旧内边距与圆角保护](../../implemented/bug-fix/2026-10-15-macos-candidate-padding-below-2pt.md)部分重叠：保留边框下限和缺省圆角推导，显式候选项圆角不再受联动影响。
+- [共享出厂版式](../../implemented/feature/2026-10-20-skin-factory-layout.md)部分重叠：皮肤几何保持原样，用户配置在其上覆盖，不改皮肤清单。
+- [候选偏好叶子契约](../../implemented/simplification/2026-10-15-candidate-preferences.md)持有类型归属，继续复用。
+
+## Alternatives considered
+
+- 四边独立配置能表达更多不对称布局，但设置复杂度更高；本次按需求采用水平、垂直两轴。
+- 直接替换旧 `candidate_padding` 可以减少兼容字段，但会改变已有用户与其他宿主的配置；保留旧字段作为逐轴回退。
+- 强制候选项圆角满足卡片相切下限可以避免加遮罩，但违背独立圆角的含义；显式圆角以卡片裁剪保证不溢出。
+
+## Consequences
+
+两种内边距均可分轴配置，窗口和候选项的圆角及间距可以独立调整。缺省不迁移、不改默认几何；代价是保留旧的统一内边距字段与逐轴兼容回退。显式候选项垂直内边距包住所有文字行，测量、绘制与命中使用相同候选矩形。展开网格的行距同时进入视口高度、滚动步长与按钮位置。
+
+卡片装饰与 canvas 不属于候选内容，遮罩只作用于普通窗口和网格的内容容器，不裁剪外部装饰和自由挂件。AppKit 回退保存整份共享文档时显式保留新字段，缺省与恢复写为 `null` 后交给 Rust 序列化省略。
+
+## Testing
+
+- `CARGO_TARGET_DIR=target/macos-cargo cargo test -p msime-client-core candidate_ --locked`：34 项通过，包含字段缺省、零值、边界、非法类型、恢复、落盘往返和宿主能力声明。
+- macOS 的 `candidate-skin`、`candidate-item-layout`、`candidate-row-layout`、`skin-preview`、`candidate-panel` 五项 CTest 通过。产品控制器测试覆盖 50/100/150/200% 缩放、横竖排、逐轴窗口高度、行内边距、独立零圆角与内容遮罩，以及展开网格的行距。共享排版测试覆盖折行与释义的上下留白。
+- 前端覆盖控件边界、逐轴旧值拆分与恢复、显式零值和 CSS token；类型检查、生产构建和相关文件 lint 通过。扩大的设置页测试中三项曾超时，隔离重跑三项全部通过。
+- macOS 产品 `MSIMEClientInputMethod` 和全部原生目标使用完整 Xcode 工具链构建通过。按用户要求安装本机签名的原生输入法及包含新前端的配置软件，开发包保留内置语音运行库。输入源检查确认双拼模式可选；已运行核心的 Mach-O UUID 与本次构建一致；通过无障碍树确认配置窗口实际显示六项新控件，使用合成全拼输入验证已安装引擎返回预期候选。未向用户正在编辑的文档发送按键，不宣称完成真实编辑器验收。
+- 使用 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` 运行本地 quick 门禁，Rust workspace、macOS 和共享 Apple bridge 编译通过；唯一失败项是 Android Java 阶段缺 API 35。其他未配置的平台由门禁跳过，不构成已验证。默认 CommandLineTools 的 SwiftUI 宏插件不可用，不能代替完整 Xcode 验证该产品。

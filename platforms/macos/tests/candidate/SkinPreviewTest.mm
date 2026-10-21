@@ -584,6 +584,24 @@ int main(int argc, const char **argv) {
         TestCandidateSurfaceTheme(preferences);
         TestToolbarPreviewChrome(preferences);
         TestCustomThemeClearsSurviveSave();
+        {
+            NSDictionary *geometry = @{
+                @"candidate_padding_horizontal": @3, @"candidate_padding_vertical": @11,
+                @"candidate_item_padding_horizontal": @0, @"candidate_item_padding_vertical": @4,
+                @"candidate_item_corner_radius": @0, @"candidate_item_spacing": @6,
+            };
+            [preferences applySharedCandidatePreferences:geometry];
+            const auto style = [preferences candidateWindowStyle];
+            assert(style.paddingHorizontal == 3 && style.paddingVertical == 11);
+            assert(style.itemPaddingHorizontal == 0 && style.itemPaddingVertical == 4);
+            assert(style.itemCornerRadius == 0 && style.itemSpacing == 6);
+            NSDictionary *merged = [preferences sharedPreferencesByMerging:@{@"synthetic_unowned": @42}];
+            for (NSString *key in geometry) assert([merged[key] isEqual:geometry[key]]);
+            assert([merged[@"synthetic_unowned"] isEqual:@42]);
+            [preferences applySharedCandidatePreferences:@{}];
+            merged = [preferences sharedPreferencesByMerging:geometry];
+            for (NSString *key in geometry) assert(merged[key] == NSNull.null);
+        }
         // Match the Windows install default and the shared Tauri settings
         // fallback: a new macOS profile starts with word-to-character on for
         // the bracket key group. The bracket paging shortcut remains off by

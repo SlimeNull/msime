@@ -1,5 +1,6 @@
 #pragma once
 #import <AppKit/AppKit.h>
+#import <QuartzCore/CAShapeLayer.h>
 #import "CandidateTypography.h"
 #import "CandidateTextMetrics.h"
 #include "../../../../shared/candidate/CandidateItemLayout.h"
@@ -380,12 +381,12 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
                                                  self.translationBelow, MSIMECandidateRunMeasure(word, annotation, translation, self.font, glossFont, scale));
     }
     // The number sits on the text's first line.
-    CGFloat textTop = (layout.textHeight - wordSize.height) / 2;
+    CGFloat textTop = layout.contentTop + (layout.textHeight - wordSize.height) / 2;
     CGFloat firstLine = wordSize.height;
     if (layout.textWrapped)
     {
         const CGFloat drawn = MSIMECandidateWrappedHeight(word, self.font, layout.textWidth);
-        textTop = MAX(0.0, (layout.textHeight - drawn) / 2);
+        textTop = layout.contentTop + MAX(0.0, (layout.textHeight - drawn) / 2);
         firstLine = MSIMECandidateTextHeight(@"", self.font);
         [word drawInRect:box(contentLeft, textTop, layout.textWidth, drawn) withAttributes:MSIMECandidateRunAttributes(self.font, titleColor, YES)];
     }
@@ -452,6 +453,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 // 候选列表的实际区域；画布平移时与真实按钮一起移动。
 @property(nonatomic) NSRect candidateRowsRect;
 @property(nonatomic) BOOL candidateRowsTouchTop;
+@property(nonatomic) BOOL clipsCandidateContent;
 // 系统主题允许原生玻璃；旧系统和降低透明度时仍画原有卡片。
 @property(nonatomic) BOOL liquidGlassEnabled;
 @property(nonatomic, readonly) BOOL liquidGlassActive;
@@ -562,6 +564,19 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 {
     [super layout];
     [self updateGlassBackground];
+    if (self.clipsCandidateContent) {
+        const CGFloat halfBorder = MAX(0.0, self.lineWidth) / 2.0;
+        const NSRect bounds = NSInsetRect(_candidateContentView.bounds, halfBorder, halfBorder);
+        const CGFloat radius = MAX(0.0, self.cornerRadius - halfBorder);
+        CAShapeLayer *mask = [CAShapeLayer layer];
+        CGPathRef path = CGPathCreateWithRoundedRect(NSRectToCGRect(bounds), radius, radius, nullptr);
+        mask.path = path;
+        CGPathRelease(path);
+        _candidateContentView.wantsLayer = YES;
+        _candidateContentView.layer.mask = mask;
+    } else {
+        _candidateContentView.layer.mask = nil;
+    }
 }
 - (BOOL)isOpaque { return NO; }
 - (void)viewDidMoveToWindow

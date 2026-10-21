@@ -7127,6 +7127,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     // The fonts arrive at the window's scale already; the row's own paddings follow them.
     const CGFloat scale = MSIMECandidateScale(_appearance);
     const auto &layout = _candidateLayoutGeometry;
+    const auto userStyle = [_appearance candidateWindowStyle];
     const CGFloat numberScale = layout && layout->numberScale.has_value()
         ? static_cast<CGFloat>(std::clamp(*layout->numberScale, 0.0, 2.0))
         : MSIMECandidateNumberScale;
@@ -7142,10 +7143,10 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     const BOOL hanjaReadings = MSIMEKoreanHanjaListOpen(_view);
     const BOOL customRowHeight = layout && layout->itemExtraHeight.has_value();
     const CGFloat itemExtraHeight = customRowHeight ? MSIMESkinLengthValue(layout->itemExtraHeight, font.pointSize, scale) : 0.0;
-    const CGFloat rowFloor = customRowHeight ? font.pointSize * 1.35 + itemExtraHeight : 0.0;
-    const CGFloat rowPadding = customRowHeight ? 0.0 : MSIMECandidateRowPadding * scale;
+    const CGFloat rowFloor = customRowHeight && !userStyle.itemPaddingVertical ? font.pointSize * 1.35 + itemExtraHeight : 0.0;
+    const CGFloat rowPadding = customRowHeight || userStyle.itemPaddingVertical ? 0.0 : MSIMECandidateRowPadding * scale;
     CGFloat candidateRow = MAX(rowFloor, MSIMECandidateTextHeight(@"", font) + rowPadding);
-    geometry.hasSkinLayout = layout.has_value();
+    geometry.hasSkinLayout = layout.has_value() || userStyle.itemPaddingHorizontal.has_value();
     geometry.hidesNumber = numberScale == 0.0;
     CGFloat numberWidth = 0;
     NSUInteger index = 0;
@@ -7189,14 +7190,16 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     geometry.readings = readings;
     geometry.scriptAnnotations = scriptAnnotations;
     geometry.tooltips = tooltips;
-    const CGFloat textLeft = layout && layout->numberInset ? MAX(5.0 * scale, MSIMESkinLengthValue(layout->numberInset, font.pointSize, scale))
-                                                            : MSIMECandidateTextLeft(showSelectedBar, scale);
+    const CGFloat textLeft = userStyle.itemPaddingHorizontal ? *userStyle.itemPaddingHorizontal * scale
+        : layout && layout->numberInset ? MAX(5.0 * scale, MSIMESkinLengthValue(layout->numberInset, font.pointSize, scale))
+                                       : MSIMECandidateTextLeft(showSelectedBar, scale);
     const CGFloat numberGap = layout ? MSIMESkinLengthValue(layout->numberGap, font.pointSize, scale, MSIMECandidateNumberGap * scale)
                                      : MSIMECandidateNumberGap * scale;
     geometry.textLeft = textLeft;
     geometry.textRight = layout ? MSIMESkinLengthValue(layout->itemPaddingRight, font.pointSize, scale, MSIMECandidateTextRight * scale)
                                 : MSIMECandidateTextRight * scale;
     if (layout && _candidateLayoutFitContent) geometry.textRight = textLeft;
+    if (userStyle.itemPaddingHorizontal) geometry.textRight = *userStyle.itemPaddingHorizontal * scale;
     // 来源在隐藏序号时仍保留至少 9 DIP 的序号栏，测量和绘制共用同一列起点。
     if (layout) numberWidth = MAX(9.0 * scale, numberWidth);
     geometry.contentLeft = textLeft + ceil(numberWidth) + numberGap;
@@ -7208,6 +7211,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         metrics.justifyRows = layout->justifyRows.value_or(false);
         metrics.itemMinWidth = vertical ? 0.0 : MSIMESkinLengthValue(layout->itemMinWidth, font.pointSize, scale);
     }
+    if (userStyle.itemPaddingVertical) metrics.paddingVertical = *userStyle.itemPaddingVertical * scale;
+    if (userStyle.itemSpacing) metrics.itemGap = metrics.columnGap = *userStyle.itemSpacing * scale;
     std::vector<msime::candidate::CandidateItemWidths> items;
     items.reserve(candidates.count);
     CGFloat natural = 0;
@@ -7238,7 +7243,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         return MSIMECandidateRunMeasure(texts[row], annotations[row], translations[row], font, glossFont, scale, rowPadding)(run, runWidth);
     };
     // Horizontal rows keep the height a gloss will need even before it arrives, so the card does not grow under the user seconds after the composition started.
-    const CGFloat minimumHeight = vertical || !reservesGloss ? 0 : candidateRow + [self reservedGlossHeightForFont:glossFont];
+    const CGFloat minimumHeight = vertical || !reservesGloss ? 0 : candidateRow + 2 * metrics.paddingVertical + [self reservedGlossHeightForFont:glossFont];
     geometry.rows = msime::candidate::LayoutCandidatePage(items, geometry.lineWidth, metrics, !vertical, measure, minimumHeight);
     for (auto &row : geometry.rows) {
         // Whole points keep neighbouring buttons touching and their text on the pixel grid.
@@ -7311,7 +7316,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             [self candidatePageGeometry:candidates font:font glossFont:glossFont showSelectedBar:_skinShowsSelectedBar inset:inset
                                  paging:pageCount > 1 && _appearance.showsCandidatePageNumber
                                 visible:screen ? screen.visibleFrame : NSMakeRect(0, 0, 1440, 900) preeditWidth:0 minimumWidth:0];
-        clearance = MAX(clearance, geometry.rowsHeight + 2 * inset);
+        clearance = MAX(clearance, geometry.rowsHeight + 2 * msime::mac::CandidateVerticalInset(skin.tokens));
     }
     if ([_view[@"candidates"] count]) {
         // The card's top row: the brand mark, the reading when it is shown, and the page indicator whenever there is more than one page and `show_candidate_page_number` is on.
@@ -7569,14 +7574,15 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
                             dark:(BOOL)dark inset:(CGFloat)inset headerHeight:(CGFloat)headerHeight {
     if (!skin.canvas) return;
     const auto &canvas = *skin.canvas;
-    const auto padding = msime::mac::CanvasContentInsets(canvas, inset);
+    const CGFloat verticalInset = msime::mac::CandidateVerticalInset(skin.tokens);
+    const auto padding = msime::mac::CanvasContentInsets(canvas, inset, verticalInset);
     const CGFloat gap = headerHeight > 0 ? canvas.lineGap.value_or(0) : 0;
     const CGFloat deltaWidth = padding.left + padding.right - 2 * inset;
-    const CGFloat deltaHeight = padding.top + padding.bottom - 2 * inset + gap;
+    const CGFloat deltaHeight = padding.top + padding.bottom - 2 * verticalInset + gap;
     for (NSView *child in content.candidateContentView.subviews) {
         NSRect frame = child.frame;
         frame.origin.x += padding.left - inset;
-        frame.origin.y += padding.bottom - inset;
+        frame.origin.y += padding.bottom - verticalInset;
         if (![child isKindOfClass:MSIMECandidateButton.class] || child.tag < 0) frame.origin.y += gap;
         child.frame = frame;
     }
@@ -7587,7 +7593,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         frame.origin.y += canvas.outer.bottom + deltaHeight;
         child.frame = frame;
     }
-    content.candidateRowsRect = NSOffsetRect(content.candidateRowsRect, padding.left - inset, padding.bottom - inset);
+    content.candidateRowsRect = NSOffsetRect(content.candidateRowsRect, padding.left - inset, padding.bottom - verticalInset);
     content.canvasOuterInsets = canvas.outer;
     NSSize size = content.frame.size;
     size.width += deltaWidth + canvas.outer.left + canvas.outer.right;
@@ -7646,6 +7652,8 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     _skinShowsSelectedBar = tokens.showSelectedBar;
     _renderedCandidateAccent = SkinColor(tokens.accent);
     const CGFloat inset = msime::mac::CandidateInset(tokens);
+    const CGFloat verticalInset = msime::mac::CandidateVerticalInset(tokens);
+    const CGFloat rowGap = tokens.itemSpacing.value_or(0.0);
     const CGFloat numberScale = skin.layout && skin.layout->numberScale.has_value()
         ? static_cast<CGFloat>(std::clamp(*skin.layout->numberScale, 0.0, 2.0))
         : MSIMECandidateNumberScale;
@@ -7704,14 +7712,14 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     if (pendingDelta != 0) {
         _expandedScrollOffset += -pendingDelta;
         while (_expandedScrollOffset >= 0 && _expandedFirstRow + windowRows < rows) {
-            const CGFloat rowHeight = geometryForRow(_expandedFirstRow).rowsHeight;
+            const CGFloat rowHeight = geometryForRow(_expandedFirstRow).rowsHeight + rowGap;
             if (!(rowHeight > 0) || _expandedScrollOffset < rowHeight) break;
             _expandedScrollOffset -= rowHeight;
             ++_expandedFirstRow;
         }
         while (_expandedScrollOffset < 0 && _expandedFirstRow > 0) {
             --_expandedFirstRow;
-            const CGFloat rowHeight = geometryForRow(_expandedFirstRow).rowsHeight;
+            const CGFloat rowHeight = geometryForRow(_expandedFirstRow).rowsHeight + rowGap;
             _expandedScrollOffset += rowHeight > 0 ? rowHeight : 0;
         }
         if (_expandedFirstRow + windowRows >= rows && _expandedScrollOffset > 0)
@@ -7735,6 +7743,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         if (row < _expandedFirstRow + visibleRows) rowsHeight += layouts.back().rowsHeight;
     }
     width = ceil(width);
+    if (visibleRows > 1) rowsHeight += (visibleRows - 1) * rowGap;
 
     if (!candidatePanel.wheelPaging) [candidatePanel resetWheelAccumulator];
     // 网格滚轮由 scrollHandler 保留像素偏移，与「滚轮翻页」开关无关；该开关仍只管普通候选窗。
@@ -7744,12 +7753,12 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     _panel.opaque = NO;
     _panel.backgroundColor = NSColor.clearColor;
     const CGFloat decorationHeight = decorationImage ? MAX(0.0, skin.decorationTopDip) : 0.0;
-    const CGFloat height = rowsHeight + 2 * inset + decorationHeight + headerHeight;
-    const CGFloat headerBottom = height - inset - decorationHeight - headerHeight;
+    const CGFloat height = rowsHeight + 2 * verticalInset + decorationHeight + headerHeight;
+    const CGFloat headerBottom = height - verticalInset - decorationHeight - headerHeight;
     [_panel setContentSize:NSMakeSize(width, height)];
     MSIMECandidateChromeView *content = [[MSIMECandidateChromeView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
     content.candidateContentView.clipsToBounds = YES;
-    content.candidateRowsRect = NSMakeRect(inset, inset, MAX(0.0, width - 2 * inset), rowsHeight);
+    content.candidateRowsRect = NSMakeRect(inset, verticalInset, MAX(0.0, width - 2 * inset), rowsHeight);
     content.candidateRowsTouchTop = headerHeight == 0;
     CGFloat rowTop = headerBottom;
     for (NSUInteger offset = 0; offset < layouts.size(); ++offset) {
@@ -7769,7 +7778,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
             button.frame = NSMakeRect(inset + cell.x, rowTop - _expandedScrollOffset - cell.y - cell.height, cell.width, cell.height);
             [content.candidateContentView addSubview:button];
         }
-        rowTop -= geometry.rowsHeight;
+        rowTop -= geometry.rowsHeight + rowGap;
     }
     const CGFloat controlsBottom = headerBottom + preeditMargin.bottom + floor((headerContentHeight - headerRow) / 2);
     const CGFloat collapseLeft = width - inset - arrowWidth;
@@ -7895,6 +7904,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const auto geometry = skin.tokens;
     _skinShowsSelectedBar = geometry.showSelectedBar;
     const CGFloat inset = msime::mac::CandidateInset(geometry);
+    const CGFloat verticalInset = msime::mac::CandidateVerticalInset(geometry);
     id preeditValue = _view[@"preedit"];
     if (![preeditValue isKindOfClass:NSString.class]) preeditValue = _view[@"editing_text"];
     NSString *preedit = _appearance.showsCandidatePreedit && [preeditValue isKindOfClass:NSString.class] ? preeditValue : @"";
@@ -7953,8 +7963,8 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     _panel.backgroundColor = NSColor.clearColor;
     // The band above the card that the decoration stands in, transparent; none without an image to put there, as on Windows.
     const CGFloat decorationHeight = decorationImage ? MAX(0.0, skin.decorationTopDip) : 0.0;
-    const CGFloat height = pageGeometry.rowsHeight + 2 * inset + decorationHeight + headerHeight;
-    const CGFloat headerBottom = height - inset - decorationHeight - headerHeight;
+    const CGFloat height = pageGeometry.rowsHeight + 2 * verticalInset + decorationHeight + headerHeight;
+    const CGFloat headerBottom = height - verticalInset - decorationHeight - headerHeight;
     // Gloss replies keep the candidate IDs and all panel structure stable. Repaint those rows in
     // place when their geometry is unchanged; a page or layout change still takes the full rebuild
     // below, which deliberately detaches every old button.
@@ -8027,7 +8037,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     }
     [_panel setContentSize:NSMakeSize(width, height)];
     MSIMECandidateChromeView *content = [[MSIMECandidateChromeView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
-    content.candidateRowsRect = NSMakeRect(inset, inset, pageGeometry.lineWidth, pageGeometry.rowsHeight);
+    content.candidateRowsRect = NSMakeRect(inset, verticalInset, pageGeometry.lineWidth, pageGeometry.rowsHeight);
     content.candidateRowsTouchTop = headerHeight == 0;
     NSUInteger slot = 0;
     const CGFloat rowsTop = headerBottom;
@@ -8171,6 +8181,8 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     // tokens.radius is the user's radius when one is set, else the package's card radius when it sets one, at the window's scale.
     content.cornerRadius = tokens.radius;
     content.lineWidth = tokens.borderWidth;
+    content.clipsCandidateContent = tokens.explicitItemRadius;
+    content.needsLayout = YES;
     // Only in a mode whose resolution draws the package: one that supports a single mode draws no background in the other.
     content.backgroundImage = skin.backgroundPath.empty() ? nil : [_appearance backgroundImageForDark:dark];
     content.backgroundFit = skin.backgroundFit;
@@ -8227,7 +8239,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         button.barColor = SkinColor(tokens.selectedBar.value_or(tokens.accent));
         button.showSelectedBar = tokens.showSelectedBar;
         button.cornerRadius = msime::mac::CandidateRowRadius(tokens, button.candidateHighlighted);
-        button.hasCornerRadii = skin.layout && skin.layout->itemCornersFollowCard.value_or(false);
+        button.hasCornerRadii = !tokens.explicitItemRadius && skin.layout && skin.layout->itemCornersFollowCard.value_or(false);
         if (button.hasCornerRadii) {
             const NSRect row = button.frame, area = content.candidateRowsRect;
             button.cornerRadii = msime::mac::CandidateRowCornerRadii(

@@ -45,6 +45,7 @@ export function AppearanceSettingsPage() {
     showCandidateWindowOpacity,
     showCandidateCornerRadius,
     showCandidatePadding,
+    showCandidateItemGeometry,
     snapshot,
     draft,
     previewCustomTheme,
@@ -219,6 +220,7 @@ export function AppearanceSettingsPage() {
         showOpacity={showCandidateWindowOpacity}
         showCornerRadius={showCandidateCornerRadius}
         showPadding={showCandidatePadding}
+        showItemGeometry={showCandidateItemGeometry}
         onChange={appearanceActions.onPreferencesChange}
       />
     </>
@@ -321,6 +323,7 @@ function HarmonyPhoneCandidateGroups() {
     showCandidateWindowOpacity,
     showCandidateCornerRadius,
     showCandidatePadding,
+    showCandidateItemGeometry,
     draft,
     setDraft,
     mobileKeyboardFeedback,
@@ -408,6 +411,7 @@ function HarmonyPhoneCandidateGroups() {
           showOpacity={showCandidateWindowOpacity}
           showCornerRadius={showCandidateCornerRadius}
           showPadding={showCandidatePadding}
+          showItemGeometry={showCandidateItemGeometry}
           onChange={appearanceActions.onPreferencesChange}
         />
       )}

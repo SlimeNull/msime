@@ -1178,11 +1178,112 @@ selected_bar = "#77ccee"
     std::filesystem::remove_all(root);
 }
 
+static void TestUserGeometry()
+{
+    NSString *suite = [@"app.msime.test.item-geometry." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    MSIMEInputController *controller = [[MSIMEInputController alloc] init];
+    RowLayoutClient *client = [RowLayoutClient new];
+    const NSRect screen = NSScreen.mainScreen.visibleFrame;
+    client.caret = NSMakeRect(NSMidX(screen), NSMidY(screen), 1, 20);
+    RowLayoutPanel *panel = [[RowLayoutPanel alloc] initWithContentRect:NSZeroRect
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        backing:NSBackingStoreBuffered defer:NO];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:panel forKey:@"panel"];
+    NSDictionary *view = @{@"focused": @YES, @"editing_text": @"ceshi", @"page": @0, @"page_count": @1,
+        @"candidates": @[@{@"text": @"合成候选甲", @"highlighted": @YES},
+                         @{@"text": @"合成候选乙"}, @{@"text": @"合成候选丙"}]};
+    [controller setValue:view forKey:@"view"];
+    for (NSNumber *percent in @[@50, @100, @150, @200]) {
+        const CGFloat scale = percent.doubleValue / 100;
+        for (NSNumber *vertical in @[@NO, @YES]) {
+            NSMutableDictionary *document = [@{
+                @"candidate_scale_percent": percent,
+                @"candidate_padding_horizontal": @3, @"candidate_padding_vertical": @9,
+                @"candidate_item_padding_horizontal": @4, @"candidate_item_padding_vertical": @2,
+                @"candidate_item_corner_radius": @0, @"candidate_corner_radius": @18,
+                @"candidate_item_spacing": @5,
+            } mutableCopy];
+            [appearance applySharedCandidatePreferences:document];
+            appearance.vertical = vertical.boolValue;
+            appearance.showsCandidatePreedit = NO;
+            appearance.showsAppLogo = NO;
+            [controller renderCandidates];
+            MSIMECandidateChromeView *chrome = (id)panel.contentView;
+            MSIMECandidateButton *first = CandidateButton(chrome, 0);
+            MSIMECandidateButton *second = CandidateButton(chrome, 1);
+            assert(first && second);
+            assert(fabs(NSMinX(first.frame) - 3 * scale) < 0.01);
+            assert(fabs(NSMinY(chrome.candidateRowsRect) - 9 * scale) < 0.01);
+            assert(fabs(first.textLeftInset - 4 * scale) < 0.01);
+            assert(fabs(first.textRightInset - 4 * scale) < 0.01);
+            assert(fabs(first.itemLayout.contentTop - 2 * scale) < 0.01);
+            assert(first.cornerRadius == 0 && !first.hasCornerRadii);
+            assert(chrome.cornerRadius == 18 * scale && chrome.clipsCandidateContent);
+            [chrome layoutSubtreeIfNeeded];
+            assert(chrome.candidateContentView.layer.mask);
+            const CGFloat gap = vertical.boolValue ? NSMinY(first.frame) - NSMaxY(second.frame)
+                                                  : NSMinX(second.frame) - NSMaxX(first.frame);
+            assert(fabs(gap - 5 * scale) < 1.01);
+            const NSSize original = chrome.frame.size;
+            document[@"candidate_padding_vertical"] = @13;
+            [appearance applySharedCandidatePreferences:document];
+            [controller renderCandidates];
+            assert(fabs(NSHeight(panel.contentView.frame) - original.height - 8 * scale) < 0.01);
+            assert(fabs(NSWidth(panel.contentView.frame) - original.width) < 0.01);
+            document[@"candidate_padding_vertical"] = @9;
+            document[@"candidate_item_padding_vertical"] = @7;
+            [appearance applySharedCandidatePreferences:document];
+            [controller renderCandidates];
+            MSIMECandidateButton *padded = CandidateButton(panel.contentView, 0);
+            assert(fabs(padded.itemLayout.contentTop - 7 * scale) < 0.01);
+            assert(fabs(padded.itemLayout.height - first.itemLayout.height - 10 * scale) < 0.01);
+        }
+    }
+    {
+        [appearance applySharedCandidatePreferences:@{
+            @"candidate_padding_horizontal": @2, @"candidate_padding_vertical": @8,
+            @"candidate_item_padding_vertical": @3, @"candidate_item_spacing": @7,
+            @"candidate_item_corner_radius": @2,
+        }];
+        appearance.vertical = NO;
+        appearance.pageSize = 3;
+        NSMutableArray *expanded = [NSMutableArray array];
+        for (NSUInteger index = 0; index < 18; ++index)
+            [expanded addObject:@{@"text": @"合成候选", @"highlighted": @(index == 0)}];
+        [controller setValue:expanded forKey:@"expandedCandidates"];
+        [controller setValue:@0 forKey:@"expandedCursor"];
+        [controller setValue:@0 forKey:@"expandedFirstRow"];
+        assert([controller renderExpandedCandidates]);
+        MSIMECandidateChromeView *chrome = (id)panel.contentView;
+        MSIMECandidateButton *first = CandidateButton(chrome, 0);
+        MSIMECandidateButton *nextRow = CandidateButton(chrome, 3);
+        assert(first && nextRow);
+        assert(fabs(NSMinX(first.frame) - 2) < 0.01);
+        assert(fabs(NSMinY(chrome.candidateRowsRect) - 8) < 0.01);
+        assert(fabs(NSMinY(first.frame) - NSMaxY(nextRow.frame) - 7) < 0.01);
+        assert(first.cornerRadius == 2);
+        [controller setValue:nil forKey:@"expandedCandidates"];
+    }
+    // 恢复后不保留旧覆盖；共享文档中的统一留白仍可作为逐轴回退。
+    [appearance applySharedCandidatePreferences:@{@"candidate_padding": @7, @"candidate_padding_vertical": @2}];
+    auto tokens = [appearance candidateWindowSkinForDark:NO].tokens;
+    assert(msime::mac::CandidateInset(tokens) == 7 && msime::mac::CandidateVerticalInset(tokens) == 2);
+    [appearance applySharedCandidatePreferences:@{}];
+    const auto style = [appearance candidateWindowStyle];
+    assert(!style.paddingHorizontal && !style.paddingVertical && !style.itemCornerRadius && !style.itemSpacing);
+    [defaults removePersistentDomainForName:suite];
+}
+
 int main(int argc, char **argv)
 {
     @autoreleasepool
     {
         [NSApplication sharedApplication];
+        TestUserGeometry();
         if (argc == 2 && std::string(argv[1]) == "--glass-host-visual") { TestHostAppearance(YES); return 0; }
         if (argc == 4 && std::string(argv[1]) == "--canvas-upstream") {
             NSString *output = @(argv[3]);
