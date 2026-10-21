@@ -36,6 +36,9 @@ pub struct Candidate {
     pub highlighted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub translation: Option<String>,
+    /// 与 `translation` 同源的 UTF-8 字节范围；空时省略，旧宿主可忽略。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub translation_runs: Vec<msime_client_core::translation::TranslationRun>,
     /// 脚本插件给这一行加的注释（≤ 32 个 UTF-16 码元，不含控制和格式字符），和引擎的 `annotation` 分开放：宿主按 `annotation` 画辅助码、韩文汉字释义，插件的注释不能混进去。没有时不出现在 JSON 里，只在桌面编译。
     #[cfg(any(
         target_os = "macos",
@@ -296,6 +299,9 @@ fn default_ai_candidate_limit() -> u8 {
     3
 }
 
+/// 在线查询包含完整 HTTP 描述符，允许模板与请求头在 JSON 中再次转义。
+pub const MAX_ONLINE_QUERY_BYTES: usize = 131_072;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct OnlineQuery {
     /// Recent committed text supplied by the focused host, bounded to 1024 UTF-8 bytes.
@@ -312,6 +318,9 @@ pub struct OnlineQuery {
     /// Host preference controlling whether a provider may return cloud suggestions.
     #[serde(default = "default_cloud_candidates")]
     pub cloud_candidates: bool,
+    /// 共享层生成的 HTTP 描述符；凭据只经过平台传输，不进入签名和日志。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_request: Option<msime_client_core::cloud::candidates::CloudHttpRequest>,
     pub session_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_assistant: Option<AiAssistantProviderConfig>,

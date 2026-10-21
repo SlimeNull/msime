@@ -81,7 +81,7 @@ macOS 26 及以上在没有选择任何服务时（候选翻译开启，小牛�
 
 ### AI 联想（自带端点与密钥）
 
-配置完整才会发起请求，发送内容是当前查询。默认值按平台不同：Windows 与 macOS 跟随来源模板，`ai_assistant.enabled` 默认开启，并预填 DeepSeek 的接口（`https://api.deepseek.com/chat/completions`）与模型（`deepseek-v4-flash`）；Token 默认为空，`chat_completion_http_request`（`crates/client-providers/src/ai.rs`）在没有可用密钥时拒绝构造请求，因此不会发出任何请求。其余宿主默认关闭，接口为空，需要显式启用并自己填写。端点可以改成任意服务，代码对它做校验：必须是 http/https、不得内嵌用户名密码、长度不超过 2048、不含控制字符（`apps/desktop/src-tauri/src/ai.rs`）。常见的 DeepSeek、OpenAI、Groq、SiliconFlow、OpenRouter、EveryAPI 只是文档和测试里出现的示例，仓库不预置任何一家的密钥。
+配置完整才会发起请求，发送内容是当前查询。默认值按平台不同：Windows 与 macOS 跟随来源模板，`ai_assistant.enabled` 默认开启，并预填 DeepSeek 的接口（`https://api.deepseek.com/chat/completions`）与模型（`deepseek-v4-flash`）；Token 默认为空，`chat_completion_http_request`（`crates/client-providers/src/ai.rs`）在没有可用密钥时拒绝构造请求，因此不会发出任何请求。唯一的例外是桌面上的 Ollama：它跑在用户自己的机器或局域网里、不做鉴权，选它时不需要也不发送 Token，接口地址仍按本机和局域网才可用 http 的规则检查。其余宿主默认关闭，接口为空，需要显式启用并自己填写。端点可以改成任意服务，代码对它做校验：必须是 http/https、不得内嵌用户名密码、长度不超过 2048、不含控制字符（`apps/desktop/src-tauri/src/ai.rs`）。常见的 DeepSeek、OpenAI、Groq、SiliconFlow、OpenRouter、EveryAPI 只是文档和测试里出现的示例，仓库不预置任何一家的密钥。
 
 ### 账号与同步（需要登录）
 
@@ -125,7 +125,7 @@ Windows 与 HarmonyOS 除了你主动提交的[社区举报](#社区举报与审
 
 ### 资源与更新下载
 
-首次准备词库时从 GitHub Releases 拉取固定版本的资源，地址、长度和 SHA-256 全部写死在 `resources/desktop-dictionary.lock.json` 里，逐一校验，全部成功才发布到内容标识目录。下载的是公开发布物，不上传任何东西。检查更新只在点击「检查更新」时进行，由应用本身（不经网页）向 `https://api.github.com/repos/metasequoiaime/msime/releases` 发起 GET 请求，在本地按平台标签前缀、版本和架构筛选；请求除 IP 地址和固定的 User-Agent `msime-client` 外不携带标识，适用 GitHub 隐私条款。
+首次准备词库时从 GitHub Releases 拉取固定版本的资源，地址、长度和 SHA-256 全部写死在 `resources/desktop-dictionary.lock.json` 里，逐一校验，全部成功才发布到内容标识目录。下载的是公开发布物，不上传任何东西。检查更新在点击「检查更新」时进行，由应用本身（不经网页）向 `https://api.github.com/repos/metasequoiaime/msime/releases` 发起 GET 请求，在本地按平台标签前缀、版本和架构筛选；请求除 IP 地址和固定的 User-Agent `msime-client` 外不携带标识，适用 GitHub 隐私条款。Linux 的设置应用另外在打开设置窗口时（启动或被叫到前台时；只为表情、剪贴板、屏幕键盘等面板启动时不请求）在后台发同一个请求，成功后一天内不再请求，失败后六小时内不再请求，发现新版本时只发一条桌面通知，不下载也不安装；上次检查的时间和找到的版本记在状态目录的 `update-check.json`。Fcitx5 插件和 IBus 宿主本身不发这个请求。构建时或运行时设置环境变量 `MSIME_DISABLE_UPDATE_CHECK=1` 可关掉这项后台检查，「检查更新」按钮照常可用；开发构建不做后台检查。
 
 六个平台的「自动更新词库」默认开启。设置应用启动、回到前台或运行期间按每天一次的节流，通过 `https://api.github.com/repos/metasequoiaime/msime-dictionary/releases?per_page=100` 查询公开版本，并从该仓库的 HTTPS Release 附件地址下载兼容的词库、清单与许可文本；GitHub 可能重定向到自己的文件存储域名。请求使用固定 User-Agent `msime-dictionary-updater`，不携带账号、设备标识、输入内容或个人词条。摘要先取自 GitHub API，再与清单交叉校验。可在「词库更新」关闭自动更新，关闭后仍可手动检查。该更新入口直接访问官方 GitHub，不使用模型资源包的镜像设置。
 
@@ -138,13 +138,13 @@ Windows 与 HarmonyOS 除了你主动提交的[社区举报](#社区举报与审
 
 | | |
 | --- | --- |
-| 触发 | 桌面上只在这几种情况下发生：在设置里选日文、粤拼、注音或笔画方案（macOS）；第一次打开手写面板（宿主需要下载手写模型时）；打开「桌面神经联想」；设置应用启动时发现已保存的方案（或上一次的中文方案）需要的词库、或已打开的桌面神经联想需要的模型还没装；在资源包那一行点「下载」或「重试」。Android 上只在你在「添加语言」里添加日语、粤语、注音或笔画，打开离线释义，打开「离线识别」（本机还没有语音运行库时），或在资源包那一行点「下载」「重试」时发生，应用启动时从不自动下载；使用按流量计费的网络时先告诉你下载大小、等你确认。从内置这些文件的旧版 Android 升级时，已经解压在本机的文件按固定的长度和 SHA-256 校验后直接转成资源包，不联网 |
-| 目的地 | GitHub Releases（`https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v.../` 的词库，`https://github.com/metasequoiaime/chinese-ime-lm/releases/download/model-v1/` 的桌面神经联想模型，`https://github.com/metasequoiaime/chinese-ime-lm/releases/download/offline-glosses-.../` 的离线释义，`https://github.com/k2-fsa/sherpa-onnx/releases/download/v.../` 的 Android 语音运行库归档，下载时会被重定向到 GitHub 的文件存储域名）与 `https://raw.githubusercontent.com/metasequoiaime/msime-engine/<固定提交>/...`（手写模型）；配置了镜像时先从镜像地址下载，镜像失败再回到上面的原地址 |
+| 触发 | 桌面上只在这几种情况下发生：在设置里选日文、五笔、粤拼、注音或笔画方案（macOS；水杉五笔随包带着五笔码表）；在设置里选用本地语音识别而输入法没有自带语音运行库（macOS）；第一次打开手写面板（宿主需要下载手写模型时）；打开「桌面神经联想」；设置应用启动时发现已保存的方案（或上一次的中文方案）需要的词库、已打开的桌面神经联想需要的模型、或已选用的本地语音识别需要的运行库（macOS）还没装；在资源包那一行点「下载」或「重试」。Android 上只在你在「添加语言」里添加日语、粤语、注音或笔画，打开离线释义，打开「离线识别」（本机还没有语音运行库时），或在资源包那一行点「下载」「重试」时发生，应用启动时从不自动下载；使用按流量计费的网络时先告诉你下载大小、等你确认。从内置这些文件的旧版 Android 升级时，已经解压在本机的文件按固定的长度和 SHA-256 校验后直接转成资源包，不联网 |
+| 目的地 | GitHub Releases（`https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v.../` 的词库，`https://github.com/metasequoiaime/chinese-ime-lm/releases/download/model-v1/` 的桌面神经联想模型，`https://github.com/metasequoiaime/chinese-ime-lm/releases/download/offline-glosses-.../` 的离线释义，`https://github.com/k2-fsa/sherpa-onnx/releases/download/v.../` 的 Android 语音运行库归档，`https://github.com/metasequoiaime/msime/releases/download/voice-runtime-macos-v.../` 的 macOS 语音运行库归档（上游库用本项目 Developer ID 重签后发布），下载时会被重定向到 GitHub 的文件存储域名）与 `https://raw.githubusercontent.com/metasequoiaime/msime-engine/<固定提交>/...`（手写模型）；配置了镜像时先从镜像地址下载，镜像失败再回到上面的原地址 |
 | 发送内容 | 对固定文件的 HTTPS GET 请求，User-Agent 为 `msime/<版本号>`；中断后接着下载时带 `Range` 头，只说明从第几个字节开始。不携带任何输入内容、账号或设备标识 |
 | 需要凭据 | 否 |
 | 偏好字段 | 沿用 `voice_input.asr_model_mirror`，默认空字符串，表示直接访问 GitHub；下载失败时资源包那一行和手写面板都提供「设置下载镜像」 |
 | 存放位置 | 偏好目录下的 `resource-packs/<资源包>/`：macOS 是 `~/Library/Application Support/app.msime.macos/resource-packs/`，Windows 是输入法服务的数据目录，Linux 是运行时选项记录的状态目录，Android 是应用私有目录 `files/bootstrap/state/resource-packs/`（没下完的部分留在同一目录下的 `.partial-<资源包>/`，下次接着下载）；许可证文本放在数据旁边 |
-| 代码 | `crates/client-providers/src/resource_packs.rs`、`apps/desktop/src-tauri/src/platform/desktop/desktop_resource_packs.rs`，Android 经 `crates/host-api/src/ffi/pack_downloads.rs` 调用同一份实现；地址、长度和 SHA-256 固定在 `resources/desktop-dictionary.lock.json`、`resources/language-dictionaries.lock.json`、`resources/offline-glosses.lock.json`、`resources/voice-runtime.lock.json` 与 `resources/voice-runtime-android.lock.json`（语音运行库归档和从中取出的两个库）、`resources/handwriting-model.lock.json` 和 `resources/settled-model.lock.json` |
+| 代码 | `crates/client-providers/src/resource_packs.rs`、`apps/desktop/src-tauri/src/platform/desktop/desktop_resource_packs.rs`，Android 经 `crates/host-api/src/ffi/pack_downloads.rs` 调用同一份实现；地址、长度和 SHA-256 固定在 `resources/desktop-dictionary.lock.json`、`resources/language-dictionaries.lock.json`、`resources/offline-glosses.lock.json`、`resources/voice-runtime.lock.json` 与 `resources/voice-runtime-android.lock.json`（语音运行库归档和从中取出的两个库）、`resources/voice-runtime-macos.lock.json`（重签的 macOS 语音运行库归档和其中的库）、`resources/handwriting-model.lock.json` 和 `resources/settled-model.lock.json` |
 
 镜像规则和下面本地语音模型的相同：必须是 `https://` 地址，镜像运营方能看到你的 IP 和你下载的是哪个资源包，但下载内容按固定的 SHA-256 校验，镜像无法替换文件，校验不过就换下一个来源。不需要这些功能就不会发生这些请求；缺少资源包时对应的方案或手写面板显示为不可用，桌面神经联想保持现有候选；Android 上缺少的语言不出现在键盘里，离线释义只有英文，本地语音识别不可用，中文输入不受影响。
 

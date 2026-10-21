@@ -52,7 +52,10 @@ final class CandidateMarkerTests: XCTestCase {
       "云候选加载中")
     XCTAssertEqual(CandidateMarker.markers(source: 3, fixedPosition: 0).map(\.spoken), ["AI 候选"])
     XCTAssertEqual(CandidateMarker.markers(source: 0, fixedPosition: 3).map(\.spoken), ["已固定第 3 位"])
-    for marker in CandidateMarker.markers(source: 2, fixedPosition: 0) + CandidateMarker.markers(source: 3, fixedPosition: 1) {
+    XCTAssertEqual(CandidateMarker.markers(source: 0, fixedPosition: 3).map(\.pinned), [true])
+    XCTAssertEqual(CandidateMarker.markers(source: 0, fixedPosition: 3).first?.symbol, "", "a pinned word is marked by colour, not by a glyph")
+    XCTAssertEqual(CandidateMarker.markers(source: 3, fixedPosition: 1).map(\.pinned), [false, true])
+    for marker in CandidateMarker.markers(source: 2, fixedPosition: 0) + CandidateMarker.markers(source: 3, fixedPosition: 0) {
       XCTAssertNotNil(UIImage(systemName: marker.symbol), marker.symbol)
     }
   }
@@ -104,6 +107,7 @@ final class CandidateMarkerTests: XCTestCase {
     XCTAssertEqual(try chip(4).accessibilityLabel, "候选词 4：泥")
 
     panel.reload(candidates: ["你", "妮", "—"], annotations: [], markers: [], aiPlaceholders: [2])
+    panel.layoutIfNeeded()
     XCTAssertEqual(try chip(3).configuration?.baseForegroundColor, skin.secondary)
     XCTAssertEqual(try chip(3).accessibilityLabel, "候选词 3：AI 候选没有结果")
   }
@@ -150,6 +154,9 @@ final class CandidateMarkerTests: XCTestCase {
     panel.reload(candidates: candidates, annotations: [], markers: [], keepingScrollPosition: true)
     panel.layoutIfNeeded()
     XCTAssertEqual(scroll.contentOffset.y, 100, accuracy: 0.5)
+    let collection = try XCTUnwrap(scroll as? UICollectionView)
+    collection.scrollToItem(at: IndexPath(item: 5, section: 0), at: .centeredVertically, animated: false)
+    collection.layoutIfNeeded()
     let seat = try XCTUnwrap(descendants(panel).first { $0.accessibilityIdentifier == "panelCandidate-6" } as? UIButton)
     XCTAssertEqual(seat.accessibilityLabel, "候选词 6：合成一")
 

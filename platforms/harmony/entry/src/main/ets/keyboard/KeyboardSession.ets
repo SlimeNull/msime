@@ -1,3 +1,5 @@
+import { CandidateLayoutPolicy, CandidateResolvedLayout } from './candidate/CandidateSkinPolicy';
+import { CandidateCanvasScene, CandidateCanvasResource, CandidateCanvasPolicy } from './candidate/CandidateCanvasPolicy';
 import { NativeCleanup } from './NativeCleanup';
 import inputMethodEngine from '@ohos.inputMethodEngine';
 import fs from '@ohos.file.fs';
@@ -50,6 +52,7 @@ import { InputDiagnosticPolicy } from './input/InputDiagnosticPolicy';
 import { InputModeHudPolicy } from './InputModeHudPolicy';
 import { HardwareKeyTarget } from './HardwareKeyDispatch';
 import { EmojiPanelKey } from './emoji/EmojiPanelKeyPolicy';
+import { MascotStickerStore } from './emoji/MascotStickerStore';
 import { DEFAULT_VOICE_HOTKEY_BINDINGS, VoiceHotkeyAction, VoiceHotkeyBindings, VoiceHotkeyPolicy,
   VoiceKey } from './input/VoiceHotkeyPolicy';
 import { HarmonyVoiceRecordingBehaviour } from './input/HarmonyVoiceRecordingBehaviour';
@@ -69,6 +72,7 @@ import { ModeBindings, DEFAULT_MODE_BINDINGS } from './InputModeRouting';
 import { FloatingToolbarLayout, ToolbarButton, ToolbarComponents, ToolbarState }
   from './FloatingToolbarLayout';
 import { ToolbarSkin, ToolbarSkinPolicy } from './ToolbarSkinPolicy';
+import { ToolbarImagePolicy, ToolbarImageResources, ToolbarImageScene, ToolbarImageLayoutReply } from './ToolbarImagePolicy';
 import { DesktopSurface } from './DesktopSurface';
 import { CandidateAnnotationPreferencePolicy } from './candidate/CandidateAnnotationPreferencePolicy';
 import { CandidateManagementAction } from './candidate/CandidateManagementAction';
@@ -81,6 +85,7 @@ import {
   CandidateSkinCatalogPolicy, CandidateSkinPackage, CandidateSkinDecoration, CandidateSkinBackground,
   CandidateSkinAlign, CandidateSkinFit, CandidateSkinAnimation
 } from './candidate/CandidateSkinCatalogPolicy';
+import { CandidateSkinPackageIdentity, SkinFileStat } from './candidate/CandidateSkinPackageIdentity';
 import { CandidateWidthPolicy } from './candidate/CandidateWidthPolicy';
 import { CandidateFontSizePolicy } from './candidate/CandidateFontSizePolicy';
 import { CandidatePagerPolicy } from './candidate/CandidatePagerPolicy';
@@ -89,7 +94,7 @@ import { CandidateNumberFontPolicy } from './candidate/CandidateNumberFontPolicy
 import { KeyboardMetrics } from './KeyboardMetrics';
 import { NativeReplyPolicy } from './NativeReplyPolicy';
 import { PrivacyGate, PrivacyRecord } from './PrivacyGate';
-import { OnlineCandidatePolicy, OnlineQuery } from './candidate/OnlineCandidatePolicy';
+import { OnlineCandidatePolicy, OnlineQuery, CloudHttpDescriptor } from './candidate/OnlineCandidatePolicy';
 import {
   TranslationPolicy, TranslationQuery, TranslationPlanItem, TranslationEntry,
   TranslationProviderConfig, TencentTranslationConfig, NiuTransTranslationConfig, AiTranslationConfig, TranslationCandidate
@@ -772,19 +777,6 @@ export interface PrepareRequest {
   edition?: string;
 }
 
-/** 词库更新状态与后台下载（`dictionary` 的 `updates`）交给 `client.dictionary` 的引擎选项，字段名与 Rust 的选项相同；ArkTS 不允许无类型的对象字面量，所以单独声明。没有语言词库目录时不带 `language_dictionaries`。 */
-interface DictionaryUpdateOptions {
-  api_version: number;
-  resources: string;
-  preferences_directory: string;
-  user_data: string;
-  cache: string;
-  dictionaries: string;
-  preferences: Record<string, Object>;
-  edition: string;
-  language_dictionaries?: string;
-}
-
 interface SnapshotQueueProcessAction {
   operation: string;
   directory: string;
@@ -992,6 +984,9 @@ export interface KeyboardPreferences {
   readonly candidateCornerRadiusUser: boolean;
   /** Image-only data URL drawn over the card surface, clipped to the card. */
   readonly candidateBackgroundImage: string | null;
+  /** 共享扫描器校验后的 canvas 快照；逐键只消费，不访问文件。 */
+  readonly candidateCanvas: CandidateCanvasScene | null;
+  readonly candidateSkinLayout?: CandidateResolvedLayout | null;
   readonly candidateBackgroundFit: CandidateSkinFit;
   readonly candidateBackgroundOpacity: number;
   /** The bounded native motion presets from the selected candidate package. */
@@ -1083,6 +1078,7 @@ interface DictionaryRequest {
   action: DictionaryAction;
 }
 
+/** 词库更新状态与后台下载（`dictionary` 的 `updates`）交给 `client.dictionary` 的引擎选项，字段名与 Rust 的选项相同；ArkTS 不允许无类型的对象字面量，所以单独声明。没有语言词库目录时不带 `language_dictionaries`。 */
 interface DictionaryUpdateOptions {
   api_version: number;
   resources: string;
@@ -1221,6 +1217,8 @@ export class KeyboardSession implements HardwareKeyTarget {
   // Key, melody, commit and achievement sounds. Configured off on a phone, which keeps its own key feedback.
   private readonly soundPlayer: KeySoundPlayer = new KeySoundPlayer();
   private readonly musicPlayer: MusicPlayer = new MusicPlayer();
+  /** 表情面板里随包的水杉娘表情包；扩展在创建时用自己的 `resourceDir` 配置它，见 `MascotStickerStore.use`。 */
+  readonly mascotStickers: MascotStickerStore = new MascotStickerStore();
   /** The typing effect and combo settings the preferences ask for; off on a phone, as the sounds are. */
   private typingEffectPreferences: TypingEffectSettings = TYPING_EFFECTS_OFF;
   /** `typingEffectPreferences` with the selected effect pack resolved by host-api: what is drawn. */
@@ -1280,6 +1278,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     candidateCornerRadiusVp: null,
     candidateCornerRadiusUser: false,
     candidateBackgroundImage: null,
+    candidateCanvas: null,
     candidateBackgroundFit: 'cover',
     candidateBackgroundOpacity: 1,
     candidateAnimation: { enter: 'none', exit: 'none', selection: 'none', durationMs: 0, staggerMs: 0 },
@@ -1376,7 +1375,9 @@ export class KeyboardSession implements HardwareKeyTarget {
     | undefined = undefined;
   /** The toolbar's face, set by whichever window is currently drawing it. */
   onToolbar: ((state: ToolbarState, buttons: ToolbarButton[], fontSize: number, scale: number,
-               toolbarSkin: ToolbarSkin) => void) | undefined = undefined;
+               toolbarSkin: ToolbarSkin, image: ToolbarImageScene | null) => void) | undefined = undefined;
+  /** 原生面板负责先调整物理尺寸，绘制层随后设置窗口形状。 */
+  onToolbarResize: (() => Promise<void>) | undefined = undefined;
   /** The status-bar panel owns the window; the ArkUI handle only reports its pan gesture. */
   onToolbarDragStart: (() => void) | undefined = undefined;
   onToolbarDrag: ((offsetX: number, offsetY: number) => void) | undefined = undefined;
@@ -1465,12 +1466,127 @@ export class KeyboardSession implements HardwareKeyTarget {
     }
   }
 
+  private canvasGeneration: number = 0;
+  private canvasPreferences: PreparedPreferences | null = null;
+  /** 上次 `applyAppearance` 读包之前取的选中包目录和 `skin.toml` 的身份，以及读完之后取的画出的装饰图、背景图的身份，见 `reloadReplacedSkinPackages`。 */
+  private skinPackageIdentity: string = '';
+  private skinImagePaths: string[] = [];
+  private skinImageIdentity: string = '';
+
+  /** 一次 `fs.statSync`。包目录被删掉、图片不在时返回 null，身份里记作缺失，不算错误。 */
+  private static statSkinFile(path: string): SkinFileStat | null {
+    try {
+      const stat: fs.Stat = fs.statSync(path);
+      const nanoseconds: bigint | undefined = stat.mtimeNs;
+      return {
+        ino: stat.ino.toString(),
+        mtime: nanoseconds === undefined ? `${stat.mtime}` : nanoseconds.toString(),
+        size: stat.size
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 浅色、深色两个槽位选中的包（`custom_theme.candidate_skin` 与 `candidate_skin_dark`）的目录和 `skin.toml` 的身份。 */
+  private selectedSkinPackageIdentity(preferences: PreparedPreferences): string {
+    const paths: string[] = CandidateSkinPackageIdentity.packagePaths(`${this.stateDirectory}/skins`,
+      [preferences.custom_theme?.candidate_skin, preferences.custom_theme?.candidate_skin_dark]);
+    return CandidateSkinPackageIdentity.identity(paths, KeyboardSession.statSkinFile);
+  }
+
   /**
-   * Resolves the global theme for both modes and draws every surface's appearance from the answer.
+   * 选中的皮肤包在原处被同名替换后重新应用外观，返回是否重新应用了。
    *
-   * The resolve reads the skin root, so it runs when the preferences are read or the theme is chosen, never while drawing. Both modes are resolved up front because each surface keeps its own light/dark rule: the keyboard, the candidate window and the toolbar can sit in different modes at once, and a theme over `system` (a package, say) answers differently in each.
+   * 设置应用重装图库作品、皮肤编辑器覆盖保存或导入同名包时，选择和偏好修订号都不变，`reloadChangedPreferences` 不会重建会话，`applyAppearance` 解析出的配色、装饰图、背景图和贴图面板会一直是旧包的，直到键盘进程重启。这里对选中的包目录、`skin.toml` 和画出的图各做一次 stat（见 `CandidateSkinPackageIdentity`），什么都没变时不读包。
    */
+  reloadReplacedSkinPackages(): boolean {
+    const preferences: PreparedPreferences | undefined = this.preparedPreferences;
+    if (this.handle === 0 || preferences === undefined) {
+      return false;
+    }
+    if (this.skinPackageIdentity === this.selectedSkinPackageIdentity(preferences)
+      && this.skinImageIdentity === CandidateSkinPackageIdentity.identity(this.skinImagePaths,
+        KeyboardSession.statSkinFile)) {
+      return false;
+    }
+    KeyboardLog.info('selected candidate skin package changed on disk; appearance reapplied');
+    this.applyAppearance(preferences);
+    this.refreshToolbar();
+    return true;
+  }
+
+  private readCandidateCanvas(packages: CandidateSkinPackage[], id: string | null, dark: boolean): CandidateCanvasScene | null {
+    const entry: CandidateSkinPackage | null = id === null ? null : CandidateSkinCatalogPolicy.package(packages, id);
+    if (entry === null || entry.canvas !== true || id === null) return null;
+    const paths: string[] = [];
+    if (entry.borderImage !== undefined && entry.borderImage !== null) {
+      paths.push(!dark && entry.borderImage.lightSource ? entry.borderImage.lightSource : entry.borderImage.source);
+    }
+    for (const decoration of entry.decorations ?? []) {
+      if (!paths.includes(decoration.image)) paths.push(decoration.image);
+    }
+    const resources: CandidateCanvasResource[] = [];
+    let remainingBytes: number = 16 * 1024 * 1024;
+    for (const relative of paths) {
+      try {
+        const request: SkinResourceRequest = {
+          directory: `${this.stateDirectory}/skins`, id: id, relative: relative, kind: 'image'
+        };
+        const reply: SkinResourceResponse = JSON.parse(client.skinResource(JSON.stringify(request))) as SkinResourceResponse;
+        if (reply.ok === true && reply.value !== undefined && reply.value !== null
+          && reply.value.bytes.length <= remainingBytes) {
+          remainingBytes -= reply.value.bytes.length;
+          resources.push({ relative: relative, contentType: reply.value.contentType, base64: new util.Base64Helper().encodeToStringSync(new Uint8Array(reply.value.bytes)) });
+        }
+      } catch (_) {
+        // 单张资源失败由绘制层回退，不影响候选输入。
+      }
+    }
+    return {
+      key: `${++this.canvasGeneration}:${id}:${dark}`, dark: dark, canvas: true,
+      borderImage: entry.borderImage, decorations: entry.decorations, resources: resources,
+      contentInsetsDip: entry.contentInsetsDip, outerInsetsDip: entry.outerInsetsDip, lineGapDip: entry.lineGapDip,
+    };
+  }
+
+  /** 外观重载时一次读取全部状态图，切换模式只消费缓存。 */
+  private readToolbarImage(packages: CandidateSkinPackage[], id: string | null): ToolbarImageResources | null {
+    const entry: CandidateSkinPackage | null = id === null ? null : CandidateSkinCatalogPolicy.package(packages, id);
+    if (!KeyboardFormFactor.isDesktop() || entry === null || entry.toolbarImage === undefined
+      || entry.toolbarImage === null || id === null) return null;
+    const resources: CandidateCanvasResource[] = [];
+    let remaining: number = 16 * 1024 * 1024;
+    for (const relative of ToolbarImagePolicy.paths(entry.toolbarImage)) {
+      try {
+        const request: SkinResourceRequest = {
+          directory: `${this.stateDirectory}/skins`, id: id, relative: relative, kind: 'image'
+        };
+        const reply: SkinResourceResponse = JSON.parse(client.skinResource(JSON.stringify(request))) as SkinResourceResponse;
+        if (reply.ok && reply.value !== undefined && reply.value !== null && reply.value.bytes.length <= remaining) {
+          remaining -= reply.value.bytes.length;
+          resources.push({ relative: relative, contentType: reply.value.contentType,
+            base64: new util.Base64Helper().encodeToStringSync(new Uint8Array(reply.value.bytes)) });
+        }
+      } catch (_) {
+        // 坏图留给原生文字与背景矩形回退，不影响输入会话。
+      }
+    }
+    return { key: `toolbar:${++this.canvasGeneration}:${id}`, spec: entry.toolbarImage, resources: resources };
+  }
+
+  /** 仅在视图确实绘制当前快照的面板后使用贴图配色，取色器仍由共享 Rust 叠加。 */
+  canvasCandidateColors(key: string): CandidateColors | null {
+    if (this.appearance.candidateCanvas?.key !== key || this.canvasPreferences === null) return null;
+    const resolved: ResolvedTheme | null = this.resolveTheme(this.canvasPreferences, this.appearance.candidateDark, true);
+    return resolved === null ? null : GlobalTheme.candidateColors(resolved.candidate, this.appearance.candidateDark);
+  }
+
+  /** 外观重载时统一解析明暗主题；各界面保留自己的模式规则，逐键绘制不读取皮肤目录。 */
   private applyAppearance(preferences: PreparedPreferences): void {
+    this.canvasPreferences = preferences;
+    // 在读包之前取：读的过程中包又被换掉时，下一次检查看到的身份和这里不同，会再应用一次，而不是把新身份记在旧内容上。
+    this.skinPackageIdentity = this.selectedSkinPackageIdentity(preferences);
     if (this.themeCatalog.length === 0) {
       this.themeCatalog = this.readThemeCatalog();
     }
@@ -1514,13 +1630,20 @@ export class KeyboardSession implements HardwareKeyTarget {
       ? this.readCandidateSkinImage(this.stateDirectory, packageId,
         skinBackground === null ? null : skinBackground.relative)
       : NO_CANDIDATE_SKIN_IMAGE;
+    // 读完之后取刚读的两张图的身份：包目录 inode 不变、只原地改写了图片时靠它们发现。触屏键盘不画这两张图，不取。
+    this.skinImagePaths = KeyboardFormFactor.isDesktop()
+      ? CandidateSkinPackageIdentity.imagePaths(`${this.stateDirectory}/skins`, packageId,
+        [skinDecoration === null ? null : skinDecoration.relative,
+          skinBackground === null ? null : skinBackground.relative])
+      : [];
+    this.skinImageIdentity = CandidateSkinPackageIdentity.identity(this.skinImagePaths, KeyboardSession.statSkinFile);
     // The store validates both to the shared bounds; an out-of-range value from an older or foreign document is ignored rather than drawn.
     const userRadius: number | null | undefined = preferences.candidate_corner_radius;
     const userRadiusValid: boolean =
       typeof userRadius === 'number' && Number.isFinite(userRadius) && userRadius >= 0 && userRadius <= 32;
     const candidateRadius: number | null = userRadiusValid
       ? userRadius as number
-      : packageId === null ? null : CandidateSkinCatalogPolicy.cornerRadiusVp(skinPackages, packageId);
+      : candidateTheme?.candidate_layout?.cornerRadius ?? (packageId === null ? null : CandidateSkinCatalogPolicy.cornerRadiusVp(skinPackages, packageId));
     const opacityPercent: number | undefined = preferences.candidate_opacity_percent;
     const windowOpacity: number = typeof opacityPercent === 'number' && Number.isFinite(opacityPercent)
       ? Math.max(50, Math.min(100, opacityPercent)) / 100 : 1;
@@ -1539,6 +1662,8 @@ export class KeyboardSession implements HardwareKeyTarget {
       candidateCornerRadiusVp: candidateRadius,
       candidateCornerRadiusUser: userRadiusValid,
       candidateBackgroundImage: backgroundImage.image,
+      candidateCanvas: this.readCandidateCanvas(skinPackages, packageId, candidateDark),
+      candidateSkinLayout: candidateTheme?.candidate_layout ?? null,
       candidateBackgroundFit: skinBackground === null ? 'cover' : skinBackground.fit,
       candidateBackgroundOpacity: skinBackground === null ? 1 : skinBackground.opacity,
       candidateAnimation: candidateAnimation,
@@ -1602,6 +1727,13 @@ export class KeyboardSession implements HardwareKeyTarget {
     // The theme's bar, then the package's `[toolbar]` colours for that mode, then its stylesheet.
     const toolbarColors: CandidateColors = GlobalTheme.candidateColors(
       toolbarTheme === null ? null : toolbarTheme.candidate, toolbarDark);
+    this.toolbarImage = this.readToolbarImage(skinPackages, toolbarPackageId);
+    this.toolbarImageRejected = false;
+    if (this.toolbarImage !== null) {
+      this.skinImagePaths.push(...CandidateSkinPackageIdentity.imagePaths(`${this.stateDirectory}/skins`,
+        toolbarPackageId, ToolbarImagePolicy.paths(this.toolbarImage.spec)));
+      this.skinImageIdentity = CandidateSkinPackageIdentity.identity(this.skinImagePaths, KeyboardSession.statSkinFile);
+    }
     this.toolbarSkin = ToolbarSkinPolicy.fromCss(toolbarColors, skinToolbar,
       ToolbarSkinPolicy.withPackage(toolbarColors,
         CandidateSkinCatalogPolicy.toolbar(skinPackages, toolbarPackageId), toolbarDark));
@@ -1628,7 +1760,7 @@ export class KeyboardSession implements HardwareKeyTarget {
   }
 
   /** One mode of the global theme. A refused request draws the native tokens rather than failing the session. */
-  private resolveTheme(preferences: PreparedPreferences, dark: boolean): ResolvedTheme | null {
+  private resolveTheme(preferences: PreparedPreferences, dark: boolean, panelDrawn: boolean = false): ResolvedTheme | null {
     const request: ResolveThemeRequest = {
       // 固定明暗的主题在另一种明暗下按跟随系统解析，见 `GlobalTheme.fitsMode`。两种明暗于是不再一致，`fixedAppearance` 也就不再把各界面钉在那种明暗上。
       global_theme: GlobalTheme.effectiveId(this.themeCatalog, preferences.global_theme, dark),
@@ -1636,7 +1768,8 @@ export class KeyboardSession implements HardwareKeyTarget {
       custom_theme: GlobalTheme.hostDrawnCustomTheme(preferences.custom_theme),
       dark: dark,
       layout: preferences.candidate_layout === 'horizontal' ? 'horizontal' : 'vertical',
-      skins_directory: `${this.stateDirectory}/skins`
+      skins_directory: `${this.stateDirectory}/skins`,
+      canvas_panel_drawn: panelDrawn
     };
     try {
       const resolved: ResolvedTheme | null =
@@ -2657,12 +2790,8 @@ export class KeyboardSession implements HardwareKeyTarget {
     };
   }
 
-  /** Push the toolbar's face to whichever window is drawing it. */
-  refreshToolbar(): void {
-    if (this.onToolbar === undefined) {
-      return;
-    }
-    const state: ToolbarState = {
+  private toolbarState(): ToolbarState {
+    return {
       english: this.englishMode,
       temporaryEnglish: this.localMode === 'temporary_english' || this.isEnglishCandidates(),
       japanese: !this.englishMode && this.schemeName === 'japanese',
@@ -2675,8 +2804,47 @@ export class KeyboardSession implements HardwareKeyTarget {
       chinesePunctuation: this.usesChinesePunctuation() && !this.writesAsciiPunctuation(),
       fullWidth: this.fullWidth, traditional: this.traditional
     };
-    this.onToolbar(state, FloatingToolbarLayout.buttons(this.toolbarComponents()),
-      this.toolbarFontSize(), this.toolbarScale(), this.toolbarSkin);
+  }
+
+  toolbarImageScene(): ToolbarImageScene | null {
+    const image: ToolbarImageResources | null = this.toolbarImage;
+    if (image === null || this.toolbarImageRejected) return null;
+    try {
+      const request: string = JSON.stringify({ toolbar: image.spec,
+        shown: ToolbarImagePolicy.shown(FloatingToolbarLayout.buttons(this.toolbarComponents()), this.toolbarState()) });
+      const reply: ToolbarImageLayoutReply = JSON.parse(client.skinToolbarImageLayout(request)) as ToolbarImageLayoutReply;
+      if (!reply.ok || reply.value === undefined || reply.value === null) return null;
+      return { key: image.key, spec: image.spec, resources: image.resources, layout: reply.value };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  toolbarSize(): number[] {
+    const scene: ToolbarImageScene | null = this.toolbarImageScene();
+    return scene === null
+      ? [FloatingToolbarLayout.widthVp(FloatingToolbarLayout.buttons(this.toolbarComponents()).length),
+        FloatingToolbarLayout.heightVp()]
+      : [scene.layout.widthDip, scene.layout.heightDip];
+  }
+
+  async resizeToolbarWindow(): Promise<void> {
+    if (this.onToolbarResize !== undefined) await this.onToolbarResize();
+  }
+
+  /** 系统拒绝非矩形状态窗或形状预算超限时，整条回退为普通工具栏。 */
+  rejectToolbarImage(key: string): void {
+    if (this.toolbarImage?.key !== key || this.toolbarImageRejected) return;
+    this.toolbarImageRejected = true;
+    KeyboardLog.info('toolbar window shape unavailable; using native bar');
+    this.refreshToolbar();
+  }
+
+  /** 将同一个状态与共享布局交给窗口。 */
+  refreshToolbar(): void {
+    if (this.onToolbar === undefined) return;
+    this.onToolbar(this.toolbarState(), FloatingToolbarLayout.buttons(this.toolbarComponents()),
+      this.toolbarFontSize(), this.toolbarScale(), this.toolbarSkin, this.toolbarImageScene());
   }
 
   beginToolbarDrag(): void {
@@ -3136,6 +3304,10 @@ export class KeyboardSession implements HardwareKeyTarget {
     // 先导入设置应用经共享沙箱发布的改动，随后的修订号比较、按键反馈和应用主题的重新读取就会看到它们。
     this.syncSharedState();
     this.reloadChangedPreferences();
+    // 镜像导入的 `skins` 可能换掉了正在用的包而偏好修订号没动，上面那步不会重新应用外观。会话建好之后键盘只在这里导入皮肤目录（扩展 `onCreate` 的那次在 `start` 之前，`start` 本来就读新包），所以也只在这里查。视图的 reload 钩子按新外观重画。
+    if (this.reloadReplacedSkinPackages() && this.onViewPreferencesReloaded !== undefined) {
+      this.onViewPreferencesReloaded();
+    }
     // 按键反馈和手写板设置是另一个文件，设置应用写它时不会推进偏好修订号，所以每次获得焦点都要读取，而不只在构建会话时读取。文件存在却读不到时保留上次的值，一次读取失败不能把隐私模式当成关闭。
     this.refreshFeedback();
     this.followPrivacyMode();
@@ -4207,6 +4379,8 @@ export class KeyboardSession implements HardwareKeyTarget {
     enabled: true, english_mode: true, punctuation: true, fullwidth: true, character_set: true,
     emoji: true, screen_keyboard: false, scale_percent: 100, font_size: 20
   };
+  private toolbarImage: ToolbarImageResources | null = null;
+  private toolbarImageRejected: boolean = false;
   private toolbarSkin: ToolbarSkin = ToolbarSkinPolicy.base(GlobalTheme.candidateColors(null, false));
   private onlineTimer: number = -1;
   private onlineEpoch: number = 0;
@@ -4429,11 +4603,31 @@ export class KeyboardSession implements HardwareKeyTarget {
         CandidateNumberFontPolicy.size(settings.candidateFontSize), settings.candidateMinWidthVp)
       : CandidateWidthPolicy.widthVp(entries, editing, settings.candidateFontSize,
         settings.candidatePreeditFontSize, settings.candidateMinWidthVp);
-    return settings.candidateShowPreedit
+    // 横排窗口和候选格使用同一份版式，序号缩为零时仍预留 9vp。
+    let layoutExtra: number = 0;
+    if (settings.candidateLayout !== 'vertical' && settings.candidateSkinLayout !== null
+      && settings.candidateSkinLayout !== undefined) {
+      const geometry = settings.candidateSkinLayout.horizontal;
+      const numberSize: number = CandidateLayoutPolicy.numberSize(geometry, settings.candidateFontSize,
+        CandidateNumberFontPolicy.size(settings.candidateFontSize));
+      entries.forEach((entry: CandidateEntry, index: number): void => {
+        const oldContent: number = CandidateWidthPolicy.chipContentVp(entry, index, settings.candidateFontSize,
+          CandidateNumberFontPolicy.size(settings.candidateFontSize));
+        const content: number = CandidateWidthPolicy.chipContentVp(entry, index, settings.candidateFontSize, numberSize)
+          + Math.max(0, 9 - (numberSize > 0 ? CandidateWidthPolicy.textWidthVp(`${index + 1}`, numberSize) : -CandidateWidthPolicy.ORDINAL_GAP_VP));
+        layoutExtra += CandidateLayoutPolicy.chipWidth(geometry, settings.candidateFontSize, content,
+          KeyboardMetrics.CANDIDATE_PADDING_VP) - oldContent - 2 * KeyboardMetrics.CANDIDATE_PADDING_VP;
+      });
+      layoutExtra += CandidateLayoutPolicy.gap(settings.candidateSkinLayout, false, settings.candidateFontSize)
+        * Math.max(0, entries.length - 1);
+    }
+    const width: number = settings.candidateShowPreedit
       ? CandidatePagerPolicy.panelWidthVp(base, editing, settings.candidatePreeditFontSize, page, pageCount,
         CandidateWidthPolicy.MAX_WIDTH_VP, CandidateLogoPolicy.slotWidthVp(
           CandidateLogoPolicy.visible(KeyboardFormFactor.isDesktop(), settings.candidateShowPreedit)))
       : base;
+    return Math.min(CandidateWidthPolicy.MAX_WIDTH_VP, Math.max(settings.candidateMinWidthVp, width + layoutExtra)
+      + CandidateCanvasPolicy.extraWidth(settings.candidateCanvas));
   }
 
   private publishTranslationPage(): void {
@@ -4548,42 +4742,50 @@ export class KeyboardSession implements HardwareKeyTarget {
   }
 
   private async fetchCloud(handle: number, queryDocument: string, epoch: number): Promise<boolean> {
-    let url: string;
-    try {
-      const reply: NativeReply<string> = JSON.parse(
-        client.cloudRequestUrl(queryDocument)) as NativeReply<string>;
-      if (reply.ok !== true || typeof reply.value !== 'string') return false;
-      url = reply.value;
-    } catch (error) {
-      KeyboardLog.error(`cloud query unavailable: ${describeError(error)}`);
-      return false;
+    const query: OnlineQuery = JSON.parse(queryDocument) as OnlineQuery;
+    const descriptor: CloudHttpDescriptor | null | undefined = query.cloud_request;
+    if (descriptor === null || descriptor === undefined || !AiEndpoint.allowed(descriptor.url)
+      || (descriptor.method !== 'GET' && descriptor.method !== 'POST')
+      || descriptor.timeout_ms < 100 || descriptor.timeout_ms > 10000
+      || descriptor.max_response_bytes !== OnlineCandidatePolicy.MAX_CLOUD_RESPONSE_BYTES) return false;
+    if (descriptor.cached_response !== undefined) {
+      if (epoch !== this.onlineEpoch || handle !== this.handle) return false;
+      return this.applyCloudBody(handle, queryDocument, descriptor.cached_response);
     }
     const request = http.createHttp();
     installNoRedirectGuard(request);
     this.onlineRequests.add(request);
+    const deadline: number = setTimeout((): void => { request.destroy(); }, descriptor.timeout_ms);
     try {
-      const response: http.HttpResponse = await request.request(url, {
-        method: http.RequestMethod.GET,
-        header: { Accept: 'application/json' },
-        connectTimeout: OnlineCandidatePolicy.CLOUD_TIMEOUT_MS,
-        readTimeout: OnlineCandidatePolicy.CLOUD_TIMEOUT_MS
+      const response: http.HttpResponse = await request.request(descriptor.url, {
+        method: descriptor.method === 'POST' ? http.RequestMethod.POST : http.RequestMethod.GET,
+        header: descriptor.headers,
+        connectTimeout: descriptor.connect_timeout_ms,
+        readTimeout: descriptor.timeout_ms,
+        maxLimit: descriptor.max_response_bytes,
+        extraData: descriptor.method === 'POST' ? descriptor.body_utf8 : undefined
       });
       if (epoch !== this.onlineEpoch || handle !== this.handle || response.responseCode < 200
         || response.responseCode >= 300 || typeof response.result !== 'string'
         || !OnlineCandidatePolicy.acceptsCloudBody(response.result)) return false;
-      const applied: NativeReply<OnlineApplyValue> = JSON.parse(client.applyCloudResponse(
-        handle, queryDocument, response.result)) as NativeReply<OnlineApplyValue>;
-      if (applied.ok === true && NativeReplyPolicy.hasValue(applied.value)
-        && applied.value.applied) this.render(applied.value.view);
-      return applied.ok === true && NativeReplyPolicy.hasValue(applied.value)
-        && applied.value.applied;
+      return this.applyCloudBody(handle, queryDocument, response.result);
     } catch (error) {
-      KeyboardLog.error(`cloud candidate unavailable: ${describeError(error)}`);
+      KeyboardLog.error('cloud candidate unavailable');
       return false;
     } finally {
+      clearTimeout(deadline);
       this.onlineRequests.delete(request);
       request.destroy();
     }
+  }
+
+  private applyCloudBody(handle: number, queryDocument: string, body: string): boolean {
+    if (!OnlineCandidatePolicy.acceptsCloudBody(body)) return false;
+    const applied: NativeReply<OnlineApplyValue> = JSON.parse(client.applyCloudResponse(
+      handle, queryDocument, body)) as NativeReply<OnlineApplyValue>;
+    if (applied.ok === true && NativeReplyPolicy.hasValue(applied.value)
+      && applied.value.applied) this.render(applied.value.view);
+    return applied.ok === true && NativeReplyPolicy.hasValue(applied.value) && applied.value.applied;
   }
 
   /** 告诉 Host API 这次 AI 没有回答。共享内核已经不放 AI 占位行，这个调用答 applied:false、不改候选列表；调用和接口留着不变；万一答了 applied:true 才重画。 */

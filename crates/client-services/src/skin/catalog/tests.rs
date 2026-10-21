@@ -16,6 +16,57 @@ fn resource_package(root: &Path) -> std::path::PathBuf {
     skin
 }
 
+#[test]
+fn image_toolbar_resources_join_the_catalog_budget_and_export() {
+    let root = tempdir().unwrap();
+    let directory = resource_package(root.path());
+    let toolbar = "[toolbar]\nmode='image'\nimage='images/bar.png'\nimage_width_dip=168\nimage_height_dip=48\n\
+        [toolbar.button_defaults]\nbackground='images/button.png'\n\
+        [toolbar.buttons.status]\nx_dip=170\ny_dip=1\nimage='images/button.png'\n\
+        [toolbar.buttons.status.images]\ncn='images/cn.png'\n";
+    fs::write(
+        directory.join("skin.toml"),
+        format!("{}{toolbar}", manifest("sample")),
+    )
+    .unwrap();
+    for path in ["images/bar.png", "images/button.png", "images/cn.png"] {
+        fs::write(directory.join(path), encoded_png(4, 3)).unwrap();
+    }
+    let summary = load(root.path(), "sample").unwrap();
+    assert_eq!(referenced_image_paths(&summary).len(), 3);
+    assert_eq!(
+        serde_json::to_value(&summary).unwrap()["toolbarImage"]["buttons"]["status"]["xDip"]
+            .as_f64(),
+        Some(170.0)
+    );
+    let files = package_files(root.path(), "sample").unwrap();
+    assert_eq!(files.images.len(), 3);
+    fs::remove_file(directory.join("images/cn.png")).unwrap();
+    assert!(load(root.path(), "sample").is_err());
+    fs::write(
+        directory.join("images/cn.png"),
+        encoded_png(MAX_IMAGE_SIDE + 1, 1),
+    )
+    .unwrap();
+    assert_eq!(
+        load(root.path(), "sample").unwrap_err(),
+        IMAGE_DIMENSIONS_TOO_LARGE
+    );
+    // 普通条形模式校验字段，但不要求被忽略的图片存在。
+    fs::write(
+        directory.join("skin.toml"),
+        format!(
+            "{}{}",
+            manifest("sample"),
+            toolbar.replace("mode='image'", "mode='bar'")
+        ),
+    )
+    .unwrap();
+    let summary = load(root.path(), "sample").unwrap();
+    assert!(summary.toolbar_image.is_none());
+    assert!(referenced_image_paths(&summary).is_empty());
+}
+
 fn encoded_png(width: u32, height: u32) -> Vec<u8> {
     let image = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
     let mut output = Cursor::new(Vec::new());
@@ -220,6 +271,39 @@ fn canvas_requires_v2_and_reserved_canvas_id_is_not_external() {
 }
 
 #[test]
+fn jpeg_remains_valid_for_legacy_background_but_not_canvas_images() {
+    let root = tempdir().unwrap();
+    let skin = resource_package(root.path());
+    let mut jpeg = Cursor::new(Vec::new());
+    image::RgbImage::new(6, 6)
+        .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+        .unwrap();
+    fs::write(skin.join("photo.jpg"), jpeg.into_inner()).unwrap();
+    fs::write(skin.join("panel.png"), encoded_png(6, 6)).unwrap();
+    fs::write(
+        skin.join("skin.toml"),
+        format!(
+            "{}\n[candidate_window.background]\nimage = 'photo.jpg'\n",
+            manifest("sample")
+        ),
+    )
+    .unwrap();
+    assert!(load_package(root.path(), "sample").is_ok());
+    let canvas = manifest("sample")
+        .replace("schema_version = 1", "schema_version = 2")
+        .replace("base = 'night'", "base = 'canvas'");
+    // 与固定上游的 bi-jpg、bi-light-jpg 和 dec-ext 断言一致，不因解码器支持 JPEG 扩大清单协议。
+    for (extra, reason) in [
+        ("[candidate_window.border_image]\nsource = 'photo.jpg'\nslice_dip = [2]\n", "invalid border_image source"),
+        ("[candidate_window.border_image]\nsource = 'panel.png'\nlight_source = 'photo.jpg'\nslice_dip = [2]\n", "invalid border_image light_source"),
+        ("[[candidate_window.decorations]]\nimage = 'photo.jpg'\nwidth_dip = 6\nheight_dip = 6\n", "invalid decoration image"),
+    ] {
+        fs::write(skin.join("skin.toml"), format!("{canvas}\n{extra}")).unwrap();
+        assert!(load_package(root.path(), "sample").err().unwrap().contains(reason));
+    }
+}
+
+#[test]
 fn animated_decorations_are_bounded_by_frames_and_decoded_pixels() {
     let root = tempdir().unwrap();
     decorated_package(root.path(), &encoded_apng(2, 2, MAX_ANIMATION_FRAMES), "");
@@ -277,23 +361,69 @@ fn gif_and_webp_decorations_are_dimension_checked_and_counted() {
 }
 
 #[test]
+fn catalog_rejects_webp_inner_geometry_instead_of_static_fallback() {
+    use crate::skin::webp_preflight::tests::{animated, static_images, with_inner_dimensions};
+    let images = static_images();
+    assert_eq!(
+        decoded_animation_frames(&animated(&images), image::ImageFormat::WebP, (4, 3), 36),
+        Ok((3, 3))
+    );
+    for bytes in images {
+        let mismatch = with_inner_dimensions(bytes, 5, 3);
+        let bytes = animated(&[mismatch]);
+        assert_eq!(
+            decoded_animation_frames(&bytes, image::ImageFormat::WebP, (4, 3), 12),
+            Err("invalid WebP frame geometry")
+        );
+        let root = tempdir().unwrap();
+        let skin = resource_package(root.path());
+        fs::write(skin.join("motion.webp"), bytes).unwrap();
+        fs::write(
+            skin.join("skin.toml"),
+            manifest("sample")
+                .replace("top_inset_dip = 0", "top_inset_dip = 10")
+                .replace("width_dip = 0", "width_dip = 10")
+                .replace(
+                    "[candidate_window.decoration]",
+                    "[candidate_window.decoration]\nimage = 'motion.webp'",
+                ),
+        )
+        .unwrap();
+        assert_eq!(
+            load(root.path(), "sample").unwrap_err(),
+            "invalid WebP frame geometry"
+        );
+    }
+}
+
+#[test]
 fn gif_frames_stop_at_the_frame_limit_and_the_package_budget() {
     assert_eq!(
         decoded_animation_frames(
             &encoded_gif(2, 2, MAX_ANIMATION_FRAMES + 1),
             image::ImageFormat::Gif,
-            4,
+            (2, 2),
             u64::MAX
         ),
         Err(ANIMATION_TOO_MANY_FRAMES)
     );
     // 剩余额度只够两帧半：第三帧解码完就停，不再往下解。
     assert_eq!(
-        decoded_animation_frames(&encoded_gif(10, 10, 5), image::ImageFormat::Gif, 100, 250),
+        decoded_animation_frames(
+            &encoded_gif(10, 10, 5),
+            image::ImageFormat::Gif,
+            (10, 10),
+            250
+        ),
         Err(IMAGE_DIMENSIONS_TOO_LARGE)
     );
     assert_eq!(
-        decoded_animation_frames(&encoded_gif(10, 10, 5), image::ImageFormat::Gif, 100, 500),
+        decoded_animation_frames(
+            &encoded_gif(10, 10, 5),
+            image::ImageFormat::Gif,
+            (10, 10),
+            500
+        ),
         Ok((5, 5))
     );
 }
@@ -304,12 +434,12 @@ fn a_gif_with_a_damaged_tail_counts_the_frames_before_it() {
     assert_eq!(bytes.pop(), Some(0x3B));
     bytes.extend([0x99, 0x00, 0x3B]);
     assert_eq!(
-        decoded_animation_frames(&bytes, image::ImageFormat::Gif, 24, u64::MAX),
+        decoded_animation_frames(&bytes, image::ImageFormat::Gif, (6, 4), u64::MAX),
         Ok((3, 3))
     );
     // 第一帧都读不出的旧资源仍按静态图处理。
     assert_eq!(
-        decoded_animation_frames(b"GIF89a", image::ImageFormat::Gif, 24, u64::MAX),
+        decoded_animation_frames(b"GIF89a", image::ImageFormat::Gif, (6, 4), u64::MAX),
         Ok((1, 1))
     );
 }
@@ -323,7 +453,7 @@ fn a_gif_frame_larger_than_its_screen_is_rejected_before_allocating() {
     bytes.extend([0x2C, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
     bytes.extend([0x02, 0x02, 0x44, 0x01, 0x00, 0x3B]);
     assert_eq!(
-        decoded_animation_frames(&bytes, image::ImageFormat::Gif, 64 * 64, u64::MAX),
+        decoded_animation_frames(&bytes, image::ImageFormat::Gif, (64, 64), u64::MAX),
         Err(IMAGE_DIMENSIONS_TOO_LARGE)
     );
     let root = tempdir().unwrap();
@@ -901,6 +1031,7 @@ fn scans_valid_and_rejects_unsafe_manifests() {
             themes: vec!["light".into()],
             min_width_dip: 0.0,
             canvas: false,
+            resolved_layout: None,
             corner_radius_dip: None,
             border_width_dip: None,
             item_corner_radius_dip: None,
@@ -923,6 +1054,7 @@ fn scans_valid_and_rejects_unsafe_manifests() {
             decoration_frames: 0,
             background: None,
             toolbar: SkinToolbar::default(),
+            toolbar_image: None,
             toolbar_icon_corner_radius_dip: None,
             border_image: None,
             content_insets_dip: None,
@@ -1159,6 +1291,16 @@ fn canvas_packages_keep_panel_colours_and_readable_host_fallback() {
     let json = serde_json::to_value(&package).unwrap();
     assert_eq!(json["candidate"]["light"]["text"], "#1A1A1A");
     assert_eq!(json["panelCandidate"]["light"]["text"], "#f5ecff");
+    let published = host_candidate_catalog(&scan(root.path()), root.path(), &["paneled"]);
+    assert_eq!(published["directory"], root.path().to_str().unwrap());
+    let entry = published["packages"][0].clone();
+    assert_eq!(entry["candidate"]["light"]["text"], "#1A1A1A");
+    assert!(super::super::theme::ThemePackage::from_host_catalog_entry(entry).is_ok());
+    assert!(
+        host_candidate_catalog(&scan(root.path()), Path::new("skins"), &[])
+            .get("directory")
+            .is_none()
+    );
     assert_eq!(package.candidate.dark.surface.as_deref(), Some("#202020"));
     assert_eq!(package.candidate.dark.text.as_deref(), Some("#F2F2F2"));
     assert_eq!(package.corner_radius_dip, None);
@@ -2081,7 +2223,7 @@ fn host_catalog_publishes_what_linux_draws_of_a_styled_package() {
     let skin = styled_package(root.path());
     let catalog = scan(root.path());
     let published = host_candidate_catalog(&catalog, root.path(), &["bigfish"]);
-    // The background and toolbar stay out: neither Linux host can draw them.
+    // Fcitx5 的经典界面主题画背景图，把工具栏配色用到它的菜单上，所以两者都发布：背景图是绝对路径，工具栏配色按模式、只留读得懂的颜色，菜单没有的拖动把手不发布。
     assert_eq!(
         published,
         serde_json::json!({"packages": [{
@@ -2098,8 +2240,60 @@ fn host_catalog_publishes_what_linux_draws_of_a_styled_package() {
             "decoration_image": skin.join("assets/character.png").to_str().unwrap(),
             "decoration_align": "left",
             "corner_radius_dip": 12.0,
+            "background_image": skin.join("assets/background.png").to_str().unwrap(),
+            "background_fit": "contain",
+            "background_opacity": 0.35,
+            "toolbar": {
+                "dark": {
+                    "background": "#141B33",
+                    "border": "#5B9BFF61",
+                    "divider": "#5B9BFF47",
+                    "icon": "#E3EAFF",
+                },
+                "light": {"background": "#F4F8FF"},
+            },
         }]})
     );
+    // 宿主把条目原样交回主题解析，严格的读法认得这些新键。
+    let entry = published["packages"][0].clone();
+    assert!(super::super::theme::ThemePackage::from_host_catalog_entry(entry).is_ok());
+    // 行圆角也发布；相对的皮肤根目录给不出宿主能打开的背景图路径，就不发布背景图。
+    let rows = root.path().join("rows");
+    fs::create_dir(&rows).unwrap();
+    fs::write(
+        rows.join("skin.toml"),
+        manifest("rows").replace(
+            "min_width_dip = 10\n",
+            "min_width_dip = 10\nitem_corner_radius_dip = 3\n",
+        ),
+    )
+    .unwrap();
+    let catalog = scan(root.path());
+    assert!(catalog.issues.is_empty(), "{catalog:?}");
+    let relative = host_candidate_catalog(&catalog, Path::new("skins"), &["bigfish"]);
+    let entry = |id: &str| {
+        relative["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(entry("rows")["item_corner_radius_dip"], 3.0);
+    assert!(entry("bigfish").get("background_image").is_none());
+    assert!(entry("bigfish").get("toolbar").is_some());
+    // 没写工具栏配色的包没有这个键。
+    assert!(entry("rows").get("toolbar").is_none());
+    // 没选中的包同样带背景图和工具栏配色：Fcitx5 的「主题」菜单换皮肤时不重写运行时选项，换上的那一款只能从这份目录读到它们。
+    let unselected = host_candidate_catalog(&catalog, root.path(), &["rows"]);
+    let bigfish = unselected["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["id"] == "bigfish")
+        .unwrap();
+    assert_eq!(bigfish, &published["packages"][0]);
 }
 
 /// `client_dialect.json` 是皮肤清单规则的共享用例表，各个实现都按它校验：这里的 `load`、msime-cloud 的 Go 移植（`internal/skins/client.go`）与种子脚本，以及 msime-windows 的 `CandidateSkinCatalog::Load`。它们各自保存一份副本，由各自仓库的同步脚本按本文件刷新，所以改规则先改这里。
@@ -2167,4 +2361,46 @@ fn shared_dialect_cases_match_the_loader() {
             (Err(reason), None) => panic!("{name}：以 {reason:?} 拒绝，应接受"),
         }
     }
+}
+
+#[test]
+fn package_files_return_the_manifest_and_each_referenced_image() {
+    let root = tempdir().unwrap();
+    let skin = root.path().join("sample");
+    fs::create_dir_all(skin.join("images")).unwrap();
+    let text = "\u{feff}schema_version = 2\nid = 'sample'\nname = 'Sample'\nversion = '1.0'\nbase = 'system'\npreview = 'preview.png'\n[supports]\nlayouts = ['vertical']\nthemes = ['light']\n[candidate_window]\nmin_width_dip = 10\n[candidate_window.decoration]\ntop_inset_dip = 20\nwidth_dip = 20\nimage = 'images/deco.png'\n[candidate_window.background]\nimage = 'images/bg.gif'\n";
+    fs::write(skin.join("skin.toml"), text).unwrap();
+    let preview = encoded_png(4, 2);
+    fs::write(skin.join("preview.png"), &preview).unwrap();
+    fs::write(skin.join("images/deco.png"), encoded_apng(3, 3, 3)).unwrap();
+    fs::write(skin.join("images/bg.gif"), encoded_gif(5, 4, 2)).unwrap();
+    // 清单没引用的文件不列。
+    fs::write(skin.join("images/unused.png"), encoded_png(1, 1)).unwrap();
+
+    let files = package_files(root.path(), "sample").unwrap();
+    assert_eq!(files.manifest, text.trim_start_matches('\u{feff}'));
+    let summary: Vec<_> = files
+        .images
+        .iter()
+        .map(|image| {
+            (
+                image.path.as_str(),
+                image.format,
+                image.dimensions,
+                image.frames,
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("images/deco.png", Some("apng"), Some((3, 3)), 3),
+            ("images/bg.gif", Some("gif"), Some((5, 4)), 2),
+            ("preview.png", Some("png"), Some((4, 2)), 1),
+        ]
+    );
+    assert_eq!(files.images[2].bytes, preview.len() as u64);
+
+    assert!(package_files(root.path(), "missing").is_err());
+    assert!(package_files(root.path(), "night").is_err());
 }

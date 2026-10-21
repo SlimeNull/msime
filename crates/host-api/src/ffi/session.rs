@@ -78,6 +78,13 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
         .map_err(|_| "dictionary access unavailable".to_owned())?
         .ok_or_else(|| "dictionary maintenance busy".to_owned())?;
         let mut engine = Session::new(&options).map_err(|e| e.to_string())?;
+        // 设置宿主据此判断下载的词库代次是否已经生效。写不进状态目录（例如 iOS 键盘没有完全访问）时设置页退回原来的判断，不影响输入，所以不让会话因此失败。
+        if let Some(state) = state_root.as_deref() {
+            let _ = msime_client_providers::dictionary_updates::record_loaded(
+                state,
+                std::path::Path::new(&options.resources),
+            );
+        }
         // Gate on the scheme actually run, as `apply_pending` does, so a preferred scheme that fell back to Quanpin starts in the same mode a rebuild would give it.
         let default_key_grid = layout_key_grid(SchemeType::from_u8(options.scheme), &applied);
         if default_key_grid.is_some() {
@@ -108,6 +115,7 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
         runtime.set_phrase_preedit(phrase_preedit);
         runtime.set_backspace_reverts_selection(applied.backspace_reverts_selection);
         runtime.set_left_right_navigation(applied.navigation.left_right);
+        runtime.set_vertical_candidates(crate::host_vertical_candidates(applied.candidate_layout));
         runtime.set_wubi_auto_commit_unique(applied.wubi_auto_commit_unique);
         runtime.set_wubi_candidate_selection(applied.wubi_candidate_selection.clone());
         runtime.set_punctuation_marks(msime_client_core::punctuation::punctuation_marks(&applied));

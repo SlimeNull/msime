@@ -304,6 +304,9 @@ impl InputSession {
 
     /// input_session_composition.cpp:714-748, with the selected row's scheme deciding the native-wubi branch.
     pub(super) fn selection_completes_composition(&self, selected: &WordItem) -> bool {
+        if let Some(consumed) = self.literal_candidate_consumed(selected) {
+            return consumed == self.raw_with_cases().len();
+        }
         // Japanese, Korean and native wubi selections always finish: their advancement never continues.
         if self.engine.current_scheme_type().selection_completes()
             || selected.scheme == SchemeType::Wubi
@@ -566,6 +569,9 @@ impl InputSession {
 
     /// input_session_composition.cpp:417-449.
     pub(super) fn pinyin_segmentation_with_cases(&self) -> Cow<'_, str> {
+        if self.has_literal_capitals() {
+            return Cow::Borrowed(self.raw_with_cases());
+        }
         let request = self.engine.request();
         match self.engine.current_scheme_type() {
             SchemeType::Wubi => Cow::Borrowed(&request.raw_input),
@@ -627,9 +633,18 @@ impl InputSession {
             return false;
         }
         // The whole list counts, not only the wubi rows. In mixed Wubi four letters are often pinyin as well — `jixu` is the wubi code of 曳光弹 and the pinyin of 继续 — and committing the one wubi row on the fourth key takes the pinyin away from someone typing it. The wubi_mixed_routing overlay counted wubi rows only; it never applied to the shipped engine, and that rule is what auto-committed 曳光弹 for jixu.
+        // 追加在末尾的快捷短语不算：它们只是编码恰好相同，而这条规则问的是五笔码本身唯一；算上它们，`addr`（莽原）这类码就因为词库里有同编码的短语而不再自动上屏。宿主提交的是第一格，所以第一格也得是那一行。
+        let candidates = self.candidates();
         self.wubi_candidates_are_native()
             && self.engine.wubi_has_complete_code()
-            && self.candidates().len() == 1
+            && candidates
+                .first()
+                .is_some_and(|item| item.source != CandidateSource::QuickPhrase)
+            && candidates
+                .iter()
+                .filter(|item| item.source != CandidateSource::QuickPhrase)
+                .count()
+                == 1
     }
 
     pub(super) fn has_active_helpcode(&self) -> bool {

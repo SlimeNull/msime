@@ -156,6 +156,154 @@ fn create_with(fixture: &Fixture, name: &str, words: &[PersonalWord]) -> String 
 }
 
 #[test]
+fn collections_borrowed_outbox_keeps_the_existing_wire_format_and_order() {
+    let id = Uuid::from_u128(1);
+    let mut outbox = Outbox::default();
+    let removed = english("removed");
+    let first = PersonalWord {
+        value: "合成\"正文".into(),
+        ..english("first")
+    };
+    let last = english("last");
+    outbox.queue(OutboxKind::Add, id, removed.clone());
+    outbox.queue(OutboxKind::Add, id, first.clone());
+    outbox.queue(OutboxKind::Remove, id, last.clone());
+    outbox.take(&removed.identity());
+    let legacy = serde_json::to_vec(&OutboxFile {
+        operations: outbox.operations().cloned().collect(),
+    })
+    .unwrap();
+    let borrowed = serde_json::to_vec(&OutboxFileRef {
+        operations: OutboxOperations(&outbox),
+    })
+    .unwrap();
+    assert_eq!(borrowed, legacy);
+    let restored = Outbox::from_file(serde_json::from_slice(&borrowed).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .operations()
+            .map(|operation| operation.word.identity())
+            .collect::<Vec<_>>(),
+        [first.identity(), last.identity()]
+    );
+    assert!(restored.get(&removed.identity()).is_none());
+    assert_eq!(
+        restored.get(&last.identity()).unwrap().op,
+        OutboxKind::Remove
+    );
+}
+
+#[test]
+fn collection_flush_scope_checkpoints_each_batch_before_releasing_its_lock() {
+    let fixture = Fixture::new();
+    let words: Vec<_> = (0..300).map(|index| english(&letters(index))).collect();
+    create_with(&fixture, "合成刷新作用域", &words);
+    let personal = fixture.personal();
+    let mut flushing = fixture.store.begin_flush().unwrap();
+    for remaining in [44, 0] {
+        personal
+            .synchronize_batch_reporting_present(
+                |requests| Ok(vec![Ok(PersonalWordApplied::Written); requests.len()]),
+                |_| {
+                    Ok(PersonalWordPage {
+                        entries: Vec::new(),
+                        has_more: false,
+                    })
+                },
+            )
+            .unwrap();
+        let view = flushing.flush().unwrap();
+        assert_eq!(view.outbox_pending, remaining);
+        let durable: OutboxFile = serde_json::from_slice(
+            &std::fs::read(fixture.store.directory.join(OUTBOX_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(durable.operations.len(), remaining);
+    }
+    drop(flushing);
+    assert_eq!(fixture.store.load().unwrap().outbox_pending, 0);
+    assert_eq!(personal.read().unwrap().pending_count(), 44);
+}
+
+#[test]
+fn collection_flush_scope_retries_a_failed_outbox_checkpoint_without_resending() {
+    let fixture = Fixture::new();
+    let words: Vec<_> = (0..300).map(|index| english(&letters(index))).collect();
+    create_with(&fixture, "合成写盘故障", &words);
+    fixture
+        .personal()
+        .synchronize_batch_reporting_present(
+            |requests| Ok(vec![Ok(PersonalWordApplied::Written); requests.len()]),
+            |_| {
+                Ok(PersonalWordPage {
+                    entries: Vec::new(),
+                    has_more: false,
+                })
+            },
+        )
+        .unwrap();
+    let mut flushing = fixture.store.begin_flush().unwrap();
+    let outbox = fixture.store.directory.join(OUTBOX_FILE);
+    let before = std::fs::read(&outbox).unwrap();
+    std::fs::remove_file(&outbox).unwrap();
+    std::fs::create_dir(&outbox).unwrap();
+    assert!(flushing.flush().is_err());
+    std::fs::remove_dir(&outbox).unwrap();
+    std::fs::write(&outbox, before).unwrap();
+    assert_eq!(flushing.flush().unwrap().sent, Some(0));
+    let durable: OutboxFile = serde_json::from_slice(&std::fs::read(&outbox).unwrap()).unwrap();
+    assert_eq!(durable.operations.len(), 44);
+}
+
+#[test]
+fn collection_engine_scope_applies_a_bounded_batch_and_keeps_failures_in_the_personal_queue() {
+    let fixture = Fixture::new();
+    let words: Vec<_> = (0..300).map(|index| english(&letters(index))).collect();
+    create_with(&fixture, "引擎直达", &words);
+    fixture
+        .personal()
+        .synchronize_batch_reporting_present(
+            |requests| Ok(vec![Ok(PersonalWordApplied::Written); requests.len()]),
+            |_| {
+                Ok(PersonalWordPage {
+                    entries: Vec::new(),
+                    has_more: false,
+                })
+            },
+        )
+        .unwrap();
+    let mut flushing = fixture.store.begin_flush().unwrap();
+    let mut ids = Vec::new();
+    let view = flushing
+        .flush_with_engine(|edits| {
+            ids.extend(edits.iter().map(|edit| edit.request_id.clone()));
+            Ok(edits
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    if index == 7 {
+                        Err("synthetic item failure".to_owned())
+                    } else {
+                        Ok(CollectionEditApplied::Written)
+                    }
+                })
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(view.sent, Some(172));
+    assert_eq!(view.outbox_pending, 0);
+    assert_eq!(ids.len(), 172);
+    assert!(ids.iter().all(|id| id.starts_with("collections-v2-")));
+    let requests = fixture.requests();
+    let pending: Vec<_> = requests
+        .iter()
+        .filter(|request| request.status == PersonalWordRequestStatus::Pending)
+        .collect();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, ids[7]);
+}
+
+#[test]
 fn collections_load_lists_import_formats_and_starts_empty() {
     let fixture = Fixture::new();
     let view = fixture.store.load().unwrap();
@@ -356,7 +504,53 @@ fn collections_queue_words_counts_distinct_additions() {
 }
 
 #[test]
-fn collections_hold_at_most_twenty_thousand_entries() {
+fn collections_rime_import_retains_thirty_three_thousand_entries_after_reload() {
+    let fixture = Fixture::new();
+    let count = 33_555;
+    let view = fixture
+        .store
+        .create("合成大词库", PersonalWordKind::Pinyin)
+        .unwrap();
+    let id = id_of(&view, "合成大词库");
+    fixture.store.set_enabled(&id, false).unwrap();
+    let text: String = (0..count)
+        .map(|index| format!("合成{}\tni hao\t{}\n", letters(index), index % 7623))
+        .collect();
+    let view = fixture
+        .store
+        .import(ImportRequest {
+            id: Some(&id),
+            name: None,
+            kind: PersonalWordKind::Pinyin,
+            format: "rime",
+            text: &text,
+            readings: None,
+        })
+        .unwrap();
+    let report = view.import.unwrap();
+    assert_eq!(report.imported, count);
+    assert!(!report.truncated);
+    assert_eq!(
+        fixture.store.load().unwrap().collections[0].entry_count,
+        count
+    );
+    let lock = fixture.store.lock().unwrap();
+    let state = fixture.store.read_state(&lock.directory).unwrap();
+    let entries = state.entries(Uuid::parse_str(&id).unwrap());
+    assert_eq!(entries.len(), count);
+    assert_eq!(
+        entries.last().unwrap().value,
+        format!("合成{}", letters(count - 1))
+    );
+    assert_eq!(entries.last().unwrap().key, "ni hao");
+    assert!(
+        fixture.requests().is_empty(),
+        "禁用集合不能提前送进引擎队列"
+    );
+}
+
+#[test]
+fn collections_reject_entries_over_the_capacity() {
     let fixture = Fixture::new();
     let view = fixture
         .store
@@ -574,6 +768,44 @@ fn collections_import_rime_percentage_weights_reach_the_personal_dictionary() {
         };
         assert_eq!(fixture.dictionary.get(&word.identity()), Some(&weight));
     }
+}
+
+#[test]
+fn collections_txt_imports_gboard_through_the_existing_personal_queue() {
+    let mut fixture = Fixture::new();
+    let text = "\u{feff}# Gboard Dictionary version:1\nhecheng\t合成\tzh-CN\n坏行\nceshi\t测试\tzh-CN\nhecheng\t合成\tzh-CN\n";
+    let view = import(&fixture, PersonalWordKind::Pinyin, "txt", text).unwrap();
+    let report = view.import.unwrap();
+    assert_eq!(
+        (report.imported, report.duplicates, report.failed),
+        (2, 1, 1)
+    );
+    assert_eq!(report.first_failures[0].line, 3);
+    assert!(!report.swapped);
+    assert_eq!(
+        view.collections[0].source,
+        CollectionSource::Import {
+            format: "standard".into()
+        }
+    );
+    fixture.drain();
+    for (key, value) in [("hecheng", "合成"), ("ceshi", "测试")] {
+        let word = PersonalWord {
+            kind: PersonalWordKind::Pinyin,
+            key: key.into(),
+            value: value.into(),
+            weight: 10000,
+        };
+        assert_eq!(fixture.dictionary.get(&word.identity()), Some(&10000));
+    }
+    let view = import(
+        &fixture,
+        PersonalWordKind::Pinyin,
+        "txt",
+        "yangben\t样本\tzh-CN\n",
+    )
+    .unwrap();
+    assert_eq!(view.import.unwrap().imported, 1);
 }
 
 #[test]

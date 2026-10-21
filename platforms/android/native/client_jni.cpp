@@ -38,6 +38,10 @@ static jbyteArray response(JNIEnv *env, char *value) {
 namespace {
 template <typename Call> jbyteArray bounded_request(JNIEnv *env, jbyteArray request, jsize limit, Call call);
 constexpr jsize kThemeRequestLimit = 1 * 1024 * 1024;
+// 与 msime_client_voice_provider_update 的请求上限一致；请求和响应不得记录。
+constexpr jsize kVoiceProviderRequestLimit = 1 * 1024 * 1024;
+// 与 msime_client_voice_endpoint_issue 的传输上限一致，不记录地址。
+constexpr jsize kVoiceEndpointRequestLimit = 65536;
 constexpr jsize kTypingStatisticsRequestLimit = 65536;
 constexpr jsize kTypingStatisticsDirectoryLimit = 16384;
 constexpr jsize kPersonalDictionaryRequestLimit = 2248576;
@@ -72,7 +76,7 @@ constexpr jsize kGlideRequestLimit = 65536;
 // 与 msime_client_set_nine_key_filter 的笔画上限一致。
 constexpr jsize kNineKeyStrokesLimit = 64;
 constexpr jsize kTraditionalConversionLimit = 1 * 1024 * 1024;
-constexpr jsize kOnlineQueryLimit = 16384;
+constexpr jsize kOnlineQueryLimit = MSIME_ONLINE_QUERY_MAX_BYTES;
 constexpr jsize kOnlineBodyLimit = 262144;
 constexpr jsize kOnlineCandidatesLimit = 16384;
 constexpr jsize kDoubaoAudioPcmLimit = 1 * 1024 * 1024;
@@ -121,6 +125,17 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_noticeDismissRa
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_themeCatalogRaw(JNIEnv *env, jclass) {
     return response(env, msime_client_theme_catalog());
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceProviderCatalogRaw(JNIEnv *env, jclass) {
+    return response(env, msime_client_voice_provider_catalog());
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceEndpointIssueRaw(JNIEnv *env, jclass, jbyteArray endpoint, jboolean websocket) {
+    return bounded_request(env, endpoint, kVoiceEndpointRequestLimit, [websocket](const uint8_t *bytes, size_t length) {
+        return msime_client_voice_endpoint_issue(bytes, length, websocket == JNI_TRUE);
+    });
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceProviderUpdateRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kVoiceProviderRequestLimit, msime_client_voice_provider_update);
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resolveThemeRaw(JNIEnv *env, jclass, jbyteArray request) {
     return bounded_request(env, request, kThemeRequestLimit, msime_client_resolve_theme);

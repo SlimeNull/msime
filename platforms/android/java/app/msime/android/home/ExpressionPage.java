@@ -31,7 +31,7 @@ public final class ExpressionPage extends ReloadingDetailPage {
     /** 共享偏好 `quote_style` 的取值与显示文字，缺省（文档里没有这个键）是弯引号。 */
     private static final String[] QUOTE_STYLES = {"curly", "corner", "corner_when_traditional"};
     private static final String[] QUOTE_STYLE_LABELS = {"弯引号 “ ” ‘ ’", "直角引号 「 」『 』", "繁体输出时用直角引号"};
-    private static final String QUOTE_STYLE_DESCRIPTION = "中文标点下 ' 键和 Shift+' 键输出的引号。直角引号：' 出「」，Shift+' 出『』";
+    private static final String QUOTE_STYLE_DESCRIPTION = "中文标点下输入 ' 和 \" 时的引号。直角引号：' 出「」，\" 出『』";
     /** 共享偏好 `bracket_style` 的取值与显示文字，缺省是实心。 */
     private static final String[] BRACKET_STYLES = {"solid", "hollow"};
     private static final String[] BRACKET_STYLE_LABELS = {"实心 【 】", "空心 〖 〗"};
@@ -133,7 +133,7 @@ public final class ExpressionPage extends ReloadingDetailPage {
         JSONObject mixed = values.optJSONObject("mixed_input");
         // 中英混输（#7081）：Engine 和 Android 运行时早就按共享偏好 mixed_input.english / minimum_prefix 在中文候选里补英文词，桌面和 iOS 都能开关、调触发长度，Android 只是没有设置项。滑块行没有副标题，触发长度的说明只能写进开关的副标题；九键、14 键在拼音一行候选都没有且没有锁定拼音时、或处在英文模式时不看这两项照样给英文词，所以副标题不说关闭后完全没有英文。
         boolean mixedEnglish = mixed == null || mixed.optBoolean("english", true);
-        intelligence.toggle("中英混输", "中文输入时在候选里补充英文单词，输入的字母或按键数达到下面的数目才出现",
+        intelligence.toggle("中英混输", "中文候选里补充英文；达到下方字母或按键数后补全，26 键中更短的完整词仍可选",
             mixedEnglish, checked -> savePreferences(edit -> mixedInput(edit).put("english", checked)));
         GroupCard.Row prefixRow = intelligence.slider("触发字母数", MIXED_PREFIX_MIN, MIXED_PREFIX_MAX, 1,
             mixed == null ? MIXED_PREFIX_DEFAULT : NumberPolicy.strictInt(mixed, "minimum_prefix", MIXED_PREFIX_DEFAULT),

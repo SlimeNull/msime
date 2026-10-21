@@ -37,11 +37,15 @@ macOS 的屏幕键盘页没有任何偏好之后，页脚不再显示全局的�
 
 ### 屏幕键盘与手写合成一页
 
+内容顺序部分由[键盘与手写设置拆成顶部标签](../feature/2026-10-19-keyboard-handwriting-top-tabs.md)替代：合并入口、能力位与路由别名继续保留，页内内容通过「键盘」「手写」标签分别显示。
+
 - 在桌面宿主上合并（最初只有 macOS 和 Linux，各平台跟进时加上 Windows 和 HarmonyOS 2-in-1）：`settingsPageProjections` 的 `handwritingOnScreenKeyboardPage` 为真、不是触屏宿主且本版本提供手写时，`handwriting` 不进 `availablePages`，`screen-keyboard` 的标题改为「键盘手写」，屏幕键盘页在键盘各组之后画手写那一组（`HandwritingSettingsContent`，和单独的「手写输入」页是同一个组件）。
 - 旧 id 仍然能打开：投影返回 `pageAliases`（`handwriting → screen-keyboard`），`useSettingsNavigation` 在 `selectPage`、宿主路由和启动页上都先查它，`settings:handwriting` 和 `initialPage="handwriting"` 打开合并后的页，而不是落到「输入」。
 - 页面 id 与路由不变，导航顺序由 `settingsNavGroups` 统一定义。最初 `SettingsNavigation.h` 也不变、Windows 两页分开，各平台跟进时 Windows 原生窗口同样并成一页（见下）。触屏宿主的手写页另有内容，不并；不提供手写的版本没有可并的页，屏幕键盘页保留原名。
 
 ### 桌面菜单名称与顺序
+
+本节的四字侧栏命名和 `desktopPageTitle` 投影由[按功能语义命名](2026-10-19-settings-navigation-semantic-titles.md)取代；下列文字保留旧决定，页面顺序与页内标签不属于这次命名调整。
 
 桌面菜单统一采用四字名称：输入设置、词库管理、按键设置、标点翻译、语音输入、键盘手写、主题外观、候选窗口、快捷工具、剪贴管理、智能辅助、扩展插件、打字统计、账号管理、维护诊断、关于水杉。不提供手写的版本仍叫「屏幕键盘」。共享桌面侧栏连续平铺页面，不显示分类标题。先排输入行为和其他输入方式，再排外观、工具、账号与支持；词库紧接输入，统计放在工具末尾，避免几个功能相邻的页面被外观打断。
 

@@ -33,8 +33,11 @@ foreach ($notice in @(
     @('resources/licenses/rime-stroke-LGPL-3.0.txt', 'Stroke orders of the Stroke scheme in the host library, rime/rime-stroke @ 1e8fff9b9494ddec23b0cbc526bcfd8171a6fd48 (main table from CNS11643, 數位發展部，CNS11643中文標準交換碼全字庫網站，https://www.cns11643.gov.tw), LGPL-3.0'),
     @('resources/licenses/vi-MIT.txt', 'vi crate behind the Vietnamese scheme in the host library, ZeroX-DG/vi-rs 0.8.0, MIT'),
     @('resources/licenses/ewts-MIT.txt', 'ewts crate behind the Tibetan scheme in the host library, emgyrz/ewts-rs 0.1.3, MIT OR Apache-2.0 used under MIT'),
+    @('platforms/windows/msimeui/UPSTREAM.md', 'Windows 皮肤图片解码器来源、固定提交和本地调整'),
+    @('platforms/windows/msimeui/LICENSE', 'msime-windows AnimatedImage，GPL-3.0'),
     @('platforms/windows/third_party/miniaudio/LICENSE', 'miniaudio (Server microphone capture and cue sounds)'),
     @('shared/voice/third_party/cppcodec/LICENSE', 'cppcodec 0.2, header-only, Base64 for Alibaba Cloud Bailian speech requests, tplgy/cppcodec, MIT'),
+    @('platforms/windows/settings/assets/feedback/NOTICE.md', 'Feedback channel icons on the about page of msime-client-settings.exe, GitHub and Telegram from yldm-tech/ai-logo (MIT), QQ from bytedance/IconPark (Apache-2.0)'),
     @('resources/licenses/OpenCC-Apache-2.0.txt', 'OpenCC dictionaries, BYVoid/OpenCC @ 26753884f1984add422f3b0249ccee8613deaff6'),
     @('plugins/script/LICENSE', 'Official script plugin uuid in server\plugin-packs, this project''s own code under MIT rather than GPL-3.0; the pack carries the same text as LICENSE.txt'),
     @('plugins/phrase_table/LICENSE', 'Official phrase table latex-symbols in server\plugin-packs, this project''s own data under MIT rather than GPL-3.0; the pack carries the same text as LICENSE.txt'))) {

@@ -239,15 +239,18 @@ http_process_lock = threading.Lock()
 http_stopping = threading.Event()
 MAX_AI_CACHE_ENTRIES = 4096
 MAX_TRANSLATION_CACHE_ENTRIES = 4096
+# 缓存不跨进程保留；随机挑战让凭据签名也只在本进程内稳定。
+_CREDENTIAL_CACHE_CHALLENGE = os.urandom(32)
 NEGATIVE_TRANSLATION_CACHE_TTL = 480
 CLOUD_REQUEST_TIMEOUT = 2.0
 # AI 推理与 Windows、client-providers 保持 8 秒总预算和 2.5 秒连接预算。
 AI_REQUEST_TIMEOUT = 8.0
 AI_CONNECT_TIMEOUT = 2.5
-HTTP_WORKER_MAX_TIMEOUT = AI_REQUEST_TIMEOUT
-# One request line from client-core. UnixSocketProvider::ai_test lets a polish test carry an 8192-byte prompt and an 8192-byte sample in a request up to 32768 bytes, so that kind alone gets the larger limit; every other request keeps the 16384-byte one.
+HTTP_WORKER_MAX_TIMEOUT = 10.0
+# 在线查询包含再次转义的 HTTP 模板与请求头；其余请求保留原有上限。
 REQUEST_LINE_LIMIT = 16384
 AI_TEST_REQUEST_LINE_LIMIT = 32768
+ONLINE_REQUEST_LINE_LIMIT = 131072
 # 空白提示词槽位所代表的联想提示词：Windows 把它编译进 AiAssistantConfig::prompt（ime_config.h），client-providers 把同样的文本存为 ai::DEFAULT_CANDIDATE_PROMPT，供在那里构造请求的宿主使用。共享偏好让这个槽位留空，所以没有这一份时，Linux 的每个 AI 请求都带着空的 system 消息，模型回的是 JSON 解析器拒收的散文。ai_service_contract.py 保证这份副本与 client-providers 的那份相同。
 DEFAULT_AI_PROMPT = "你是一个中文全拼输入法联想引擎。输入为已经切分好的拼音数组、前文上下文和候选数量。\n\n优先生成与拼音严格对应的中文候选：若有 N 段拼音，首选必须尽量为 N 个汉字，每段拼音对应一个汉字，不得随意增删或改变读音。结合上下文、常用程度、语义完整性和固定搭配排序。\n\n若去掉分词后能明显组成更合理的英文单词、缩写、产品名或技术术语，如 `deep + seek → DeepSeek`、`git + hub → GitHub`，可优先返回英文；不要生造英文或做牵强匹配。\n\n只输出合法 JSON，不要解释或输出 Markdown：\n\n{\n\"candidates\": [\n{\n\"text\": \"候选内容\",\n\"type\": \"chinese或english\",\n\"confidence\": 0.98\n}\n]\n}\n\n候选按推荐程度降序排列，数量不超过指定上限；没有合理结果时返回空数组。"
 DEFAULT_TRANSLATION_PROMPT = "你是一个机器翻译服务。把用户给出的文本从 source_language 翻译成 target_language。只翻译文本本身，保留原意和标点，不要解释、注释或改写。只输出合法 JSON，不要输出 Markdown：{\"translation\":\"译文\"}。没有合适译文时输出空字符串。"
@@ -294,7 +297,7 @@ def request_opener(url, connect_timeout=None):
     return urllib.request.build_opener(*handlers)
 
 
-def fetch_direct(url, timeout, body=None, token=None, extra_headers=None, connect_timeout=None):
+def fetch_direct(url, timeout, body=None, token=None, extra_headers=None, connect_timeout=None, max_response_bytes=65536):
     headers = {"Content-Type": "application/json", "User-Agent": "MSIME-Client"}
     if token:
         headers["Authorization"] = "Bearer " + token
@@ -302,13 +305,13 @@ def fetch_direct(url, timeout, body=None, token=None, extra_headers=None, connec
     payload = body if isinstance(body, bytes) else None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(url, data=payload, headers=headers)
     with request_opener(url, connect_timeout).open(request, timeout=timeout) as response:
-        payload = response.read(65537)
-    if len(payload) > 65536:
+        payload = response.read(max_response_bytes + 1)
+    if len(payload) > max_response_bytes:
         raise ValueError("response too large")
     return payload
 
 
-def fetch(url, timeout, body=None, token=None, extra_headers=None, connect_timeout=None):
+def fetch(url, timeout, body=None, token=None, extra_headers=None, connect_timeout=None, max_response_bytes=65536):
     # Include DNS, TLS, upload and response reads in one deadline. Request data travels only through anonymous pipes, never command-line arguments.
     deadline = time.monotonic() + timeout
     body = body if isinstance(body, bytes) else None if body is None else json.dumps(body).encode()
@@ -317,6 +320,8 @@ def fetch(url, timeout, body=None, token=None, extra_headers=None, connect_timeo
                "token": token, "extra_headers": extra_headers}
     if connect_timeout is not None:
         request["connect_timeout"] = connect_timeout
+    if max_response_bytes != 65536:
+        request["max_response_bytes"] = max_response_bytes
     metadata = json.dumps(request).encode()
     if len(metadata) > 262144 or timeout <= 0:
         raise ValueError("invalid HTTP request")
@@ -332,7 +337,7 @@ def fetch(url, timeout, body=None, token=None, extra_headers=None, connect_timeo
         if remaining <= 0:
             raise TimeoutError("HTTP request deadline exceeded")
         output, _ = process.communicate(metadata, timeout=remaining)
-        if process.returncode != 0 or len(output) > 65536:
+        if process.returncode != 0 or len(output) > max_response_bytes:
             raise ValueError("HTTP request failed")
         return json.loads(output)
     finally:
@@ -370,6 +375,9 @@ def http_request_worker():
         if connect_timeout is not None and (
                 type(connect_timeout) not in (int, float) or not 0 < connect_timeout <= timeout):
             return 1
+        limit = request.get("max_response_bytes", 65536)
+        if type(limit) is not int or not 0 < limit <= 262144:
+            return 1
         # The parent normally enforces the deadline and reaps this worker.
         # Keep a process-local limit too, so a crashed parent cannot leave DNS
         # or a slowly streaming HTTP response running indefinitely. The default
@@ -399,24 +407,34 @@ def candidate(text, source):
 
 
 def cloud(query):
-    # A cache probe never leaves the machine; only the debounced request may reach the network.
+    """只执行 Rust 的描述符；把原始 JSON 交回共享解析器，不在脚本里维护服务协议。"""
     if (query.get("ai_cache_only") or not query.get("cloud_candidates", True) or
             not query.get("cloud_eligible")):
         return None
-    text = query.get("query_text")
-    if not isinstance(text, str) or not text or len(text.encode()) > 4096:
+    descriptor = query.get("cloud_request")
+    if not isinstance(descriptor, dict):
         return None
-    params = urllib.parse.urlencode({"text": text, "itc": "ja-t-i0-und" if
-        query.get("scheme") == 3 else "zh-t-i0-pinyin", "num": 1, "ie": "utf-8", "oe": "utf-8"})
-    result = fetch("https://inputtools.google.com/request?" + params, CLOUD_REQUEST_TIMEOUT)
-    # Match Windows cloud_ime's SUCCESS/first-candidate contract while
-    # rejecting malformed provider JSON before indexing nested values.
-    if (isinstance(result, list) and len(result) >= 2 and result[0] == "SUCCESS" and
-        isinstance(result[1], list) and result[1] and isinstance(result[1][0], list) and
-        len(result[1][0]) >= 2 and isinstance(result[1][0][1], list) and
-        result[1][0][1]):
-        return candidate(result[1][0][1][0], 0)
-    return None
+    if isinstance(descriptor.get("cached_response"), str):
+        return {"cloud_response": descriptor["cached_response"]}
+    url = descriptor.get("url")
+    method = descriptor.get("method")
+    timeout_ms = descriptor.get("timeout_ms")
+    connect_ms = descriptor.get("connect_timeout_ms")
+    if (not isinstance(url, str) or not secure_custom_endpoint(url)
+            or method not in ("GET", "POST")
+            or not isinstance(timeout_ms, int) or not 100 <= timeout_ms <= 10000
+            or not isinstance(connect_ms, int) or not 0 < connect_ms <= timeout_ms):
+        return None
+    body = descriptor.get("body_utf8", "")
+    headers = descriptor.get("headers")
+    if not isinstance(body, str) or len(body.encode()) > 8192 or not isinstance(headers, dict):
+        return None
+    result = fetch(url, timeout_ms / 1000,
+                   body.encode() if method == "POST" else None,
+                   extra_headers=headers, connect_timeout=connect_ms / 1000, max_response_bytes=262144)
+    if result is None:
+        return None
+    return {"cloud_response": json.dumps(result, ensure_ascii=False)}
 
 
 def ai_prompt(options):
@@ -448,6 +466,38 @@ def ai_config_matches(options, config):
         for key in ("provider", "endpoint", "model"))
 
 
+OLLAMA_PROVIDER = "ollama"
+
+
+def ollama_config(options, require_model=True):
+    """Ollama 不鉴权：设置页不显示 Token，私有文件里也就没有它的条目。接口地址和模型直接取设置页传来的值，请求不带 Authorization（token 为 None）。
+
+    地址和模型按 load_ai_config 的规则检查：非空字符串、不含控制字符，http 仍只认本机或局域网。值原样使用、不去空白，ai_config_matches 拿设置页的值核对时才对得上。列模型时还没有选模型，`require_model` 为假时模型可以空着。
+    """
+    if not isinstance(options, dict) or options.get("provider") != OLLAMA_PROVIDER:
+        return None
+    entry = {"provider": OLLAMA_PROVIDER, "token": None}
+    for key in ("endpoint", "model"):
+        value = options.get(key, "")
+        if not isinstance(value, str) or len(value.encode()) > 4096:
+            return None
+        if not value.strip() and (key == "endpoint" or require_model):
+            return None
+        if any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in value):
+            return None
+        entry[key] = value
+    if ai_endpoint_check(entry["endpoint"]) != "allowed":
+        return None
+    return entry
+
+
+def credential_cache_fingerprint(value):
+    # API 凭据作为 HMAC 密钥，对本进程的随机挑战签名，不创建密码验证器。
+    # 长度前缀区分 HMAC 补零后可能相同的密钥，例如空串和一个 NUL。
+    key = len(value).to_bytes(4, "big") + value
+    return hmac.digest(key, _CREDENTIAL_CACHE_CHALLENGE, "sha256")
+
+
 def ai_cache_key(query, config):
     options = query.get("ai_assistant")
     segments = query.get("pinyin_segments")
@@ -460,12 +510,13 @@ def ai_cache_key(query, config):
         if not isinstance(value, str):
             return None
         identity[key] = value
-    token = config.get("token") if isinstance(config, dict) else None
-    if not isinstance(token, str):
-        return None
-    # A credential rotation must not reuse an answer generated under the
-    # previous credential. Keep only a digest in the in-memory key.
-    identity["credential_sha256"] = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    # Ollama 没有凭据，缓存只按接口、模型和请求内容区分。
+    if identity["provider"] != OLLAMA_PROVIDER:
+        token = config.get("token") if isinstance(config, dict) else None
+        if not isinstance(token, str):
+            return None
+        # 凭据轮换后不能复用旧答案；内存缓存键只保留本进程的凭据指纹。
+        identity["credential_hmac"] = credential_cache_fingerprint(token.encode("utf-8")).hex()
     configured_limit = options.get("candidate_limit", 3)
     identity["candidate_limit"] = (configured_limit
                                     if type(configured_limit) is int and 1 <= configured_limit <= 10
@@ -492,11 +543,14 @@ def ai_cache_key(query, config):
 def configured_ai(query, path, cache=None, cache_lock=None):
     # Do not touch the private file when this query cannot request AI.
     options = query.get("ai_assistant")
-    if not path or not query.get("ai_eligible") or not isinstance(options, dict) or not options.get("enabled"):
+    if not query.get("ai_eligible") or not isinstance(options, dict) or not options.get("enabled"):
         return None
-    config = load_ai_config(path)
-    selected = select_ai_config(config, query)
-    options = query.get("ai_assistant")
+    if options.get("provider") == OLLAMA_PROVIDER:
+        selected = ollama_config(options)
+    elif path:
+        selected = select_ai_config(load_ai_config(path), query)
+    else:
+        return None
     if not ai_config_matches(options, selected):
         return None
     key = ai_cache_key(query, selected)
@@ -618,7 +672,9 @@ def ai_translation(text, target, options, path):
     if direction is None or not isinstance(options, dict) or not options.get("enabled"):
         return None
     config = None
-    if path:
+    if options.get("provider") == OLLAMA_PROVIDER:
+        config = ollama_config(options)
+    elif path:
         loaded = load_ai_config(path)
         provider = options.get("provider")
         config = loaded if loaded.get("provider") == provider else loaded.get("profiles", {}).get(provider)
@@ -858,7 +914,7 @@ def translations(query, server):
             return []
         app_id, apikey = app_id.strip(), apikey.strip()
         niutrans = {"enabled": True, "app_id": app_id, "apikey": apikey}
-        provider = ("niutrans", hashlib.sha256((app_id + "\0" + apikey).encode()).digest())
+        provider = ("niutrans", credential_cache_fingerprint((app_id + "\0" + apikey).encode()))
     elif selected == "custom":
         endpoint = custom.get("endpoint", "")
         if not isinstance(endpoint, str) or len(endpoint) > 2048:
@@ -874,8 +930,8 @@ def translations(query, server):
         # requests in both directions and for cache identity, without editing
         # the incoming query or the user's persisted preferences.
         custom = {**custom, "endpoint": endpoint, "api_key": token}
-        # Keep credentials out of cache keys and separate caches when they change.
-        provider = (endpoint, hashlib.sha256(token.encode()).digest())
+        # 缓存键不保留凭据，凭据改变时隔离缓存。
+        provider = (endpoint, credential_cache_fingerprint(token.encode()))
     elif selected == "ai":
         # options 要在这里先取出来：下面才赋值的话，Python 把它当成还没赋值的局部变量，这一行抛 UnboundLocalError，AI 候选翻译从来没走到请求那一步。
         options = query.get("ai_assistant")
@@ -888,7 +944,7 @@ def translations(query, server):
         if not tencent_config:
             return []
         scope = json.dumps(tencent_config, sort_keys=True, separators=(",", ":")).encode()
-        provider = ("tencent", hashlib.sha256(scope).digest())
+        provider = ("tencent", credential_cache_fingerprint(scope))
     deadline = time.monotonic() + 6
     if selected == "ai":
         rows = []
@@ -946,13 +1002,16 @@ def translations(query, server):
 
 
 def ai_credential_test(config, path):
-    if not path or not isinstance(config, dict):
+    if not isinstance(config, dict):
         return False
-    private = load_ai_config(path)
     provider = config.get("provider")
-    if not isinstance(provider, str):
+    if provider == OLLAMA_PROVIDER:
+        selected = ollama_config(config)
+    elif path and isinstance(provider, str):
+        private = load_ai_config(path)
+        selected = private if private.get("provider") == provider else private.get("profiles", {}).get(provider)
+    else:
         return False
-    selected = private if private.get("provider") == provider else private.get("profiles", {}).get(provider)
     if (not isinstance(selected, dict) or
             any(config.get(key) != selected.get(key) for key in ("provider", "endpoint", "model"))):
         return False
@@ -979,12 +1038,15 @@ def select_ai_profile(config, path):
     models available at an endpoint is how a user finds out what to put in that
     field.
     """
-    if not path or not isinstance(config, dict):
+    if not isinstance(config, dict):
+        return None
+    provider = config.get("provider")
+    if provider == OLLAMA_PROVIDER:
+        # 没有私有条目，地址和模型就是设置页的值；列模型时模型可以还没选。
+        return ollama_config(config, require_model=False)
+    if not path or not isinstance(provider, str):
         return None
     private = load_ai_config(path)
-    provider = config.get("provider")
-    if not isinstance(provider, str):
-        return None
     selected = private if private.get("provider") == provider else private.get("profiles", {}).get(provider)
     if (not isinstance(selected, dict) or
             any(config.get(key) != selected.get(key) for key in ("provider", "endpoint"))):
@@ -1046,7 +1108,7 @@ def ai_polish_test(query, server):
     selected = select_ai_profile(query, server.ai_config_path)
     prompt = query.get("prompt", "")
     text = query.get("text")
-    if (not selected or selected.get("model") != query.get("model") or
+    if (not selected or not selected.get("model") or selected.get("model") != query.get("model") or
             not isinstance(prompt, str) or len(prompt.encode()) > 8192 or
             not isinstance(text, str) or not text.strip() or len(text.encode()) > 8192):
         return {"text": ""}
@@ -1104,13 +1166,14 @@ def read_request(rfile):
 
     The limits count the JSON without its newline, the way client-core checks request.len() before appending the terminator.
     """
-    line = rfile.readline(AI_TEST_REQUEST_LINE_LIMIT + 2)
-    if len(line) - 1 > AI_TEST_REQUEST_LINE_LIMIT or not line.endswith(b"\n"):
+    line = rfile.readline(ONLINE_REQUEST_LINE_LIMIT + 2)
+    if len(line) - 1 > ONLINE_REQUEST_LINE_LIMIT or not line.endswith(b"\n"):
         return None
     request = json.loads(line)
     if not isinstance(request, dict):
         return None
-    if len(line) - 1 > REQUEST_LINE_LIMIT and request.get("kind") != "ai_test":
+    limit = {"online": ONLINE_REQUEST_LINE_LIMIT, "ai_test": AI_TEST_REQUEST_LINE_LIMIT}.get(request.get("kind"), REQUEST_LINE_LIMIT)
+    if len(line) - 1 > limit:
         return None
     return request
 
@@ -1154,18 +1217,24 @@ class Handler(socketserver.StreamRequestHandler):
                                     self.server.ai_candidate_cache,
                                     self.server.ai_candidate_cache_lock)]
                 rows = []
+                cloud_response = None
                 seen = set()
                 for job in jobs:
                     result = job.result()
                     for row in result if isinstance(result, list) else [result]:
-                        if row is None or row["text"] in seen:
+                        if row is None:
+                            continue
+                        if "cloud_response" in row:
+                            cloud_response = row["cloud_response"]
+                            continue
+                        if row["text"] in seen:
                             continue
                         proposed = rows + [row]
                         if len(json.dumps({"candidates": proposed}, ensure_ascii=False).encode()) + 1 > 16384:
                             continue
                         rows.append(row)
                         seen.add(row["text"])
-            self.wfile.write(json.dumps({"candidates": rows}, ensure_ascii=False).encode() + b"\n")
+            self.wfile.write(json.dumps({"candidates": rows, "cloud_response": cloud_response}, ensure_ascii=False).encode() + b"\n")
         except Exception:
             pass
 

@@ -1,3 +1,5 @@
+import { CandidateLayoutPolicy } from '../keyboard/candidate/CandidateSkinPolicy';
+import { CandidateCanvasPolicy } from '../keyboard/candidate/CandidateCanvasPolicy';
 import InputMethodExtensionAbility from '@ohos.InputMethodExtensionAbility';
 import inputMethodEngine from '@ohos.inputMethodEngine';
 import Want from '@ohos.app.ability.Want';
@@ -146,11 +148,10 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       return;
     }
     const session: KeyboardSession = KeyboardSession.shared;
-    const count: number = FloatingToolbarLayout.buttons(session.toolbarComponents()).length;
+    const size: number[] = session.toolbarSize();
     const scale: number = session.toolbarScale();
-    await panel.resize(
-      Math.round(FloatingToolbarLayout.widthVp(count) * scale * density),
-      Math.round(FloatingToolbarLayout.heightVp() * scale * density));
+    await panel.resize(Math.max(1, Math.round(size[0] * scale * density)),
+      Math.max(1, Math.round(size[1] * scale * density)));
   }
 
   /**
@@ -203,6 +204,9 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         return;
       }
       this.toolbar = toolbar;
+      KeyboardSession.shared.onToolbarResize = async (): Promise<void> => {
+        await this.resizeToolbar(this.density, toolbar);
+      };
       KeyboardSession.shared.onToolbarDragStart = (): void => {
         this.beginToolbarDrag();
       };
@@ -220,11 +224,9 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       }
       KeyboardSession.shared.refreshToolbar();
       // Lower right by default, clear of the dock, where a status bar is looked for and where it is least likely to sit on top of what is being written. macOS picks the same corner.
-      const width: number = FloatingToolbarLayout.widthVp(
-        FloatingToolbarLayout.buttons(KeyboardSession.shared.toolbarComponents()).length)
-        * KeyboardSession.shared.toolbarScale() * this.density;
-      const height: number = FloatingToolbarLayout.heightVp()
-        * KeyboardSession.shared.toolbarScale() * this.density;
+      const size: number[] = KeyboardSession.shared.toolbarSize();
+      const width: number = size[0] * KeyboardSession.shared.toolbarScale() * this.density;
+      const height: number = size[1] * KeyboardSession.shared.toolbarScale() * this.density;
       const margin: number = TOOLBAR_MARGIN_VP * this.density;
       this.toolbarPosition = [Math.round(this.screenWidth - width - margin),
         Math.round(this.screenHeight - height - margin * 4)];
@@ -242,6 +244,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         && (generation === this.statusPanelGeneration || this.toolbar !== toolbar)) {
         if (this.toolbar === toolbar) {
           this.toolbar = undefined;
+          KeyboardSession.shared.onToolbarResize = undefined;
           KeyboardSession.shared.onToolbarDragStart = undefined;
           KeyboardSession.shared.onToolbarDrag = undefined;
         }
@@ -254,6 +257,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     if (this.toolbar === undefined) {
       return;
     }
+    KeyboardSession.shared.onToolbarResize = undefined;
     KeyboardSession.shared.onToolbarDragStart = undefined;
     KeyboardSession.shared.onToolbarDrag = undefined;
     engine.destroyPanel(this.toolbar);
@@ -336,10 +340,10 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       return;
     }
     const session: KeyboardSession = KeyboardSession.shared;
-    const count: number = FloatingToolbarLayout.buttons(session.toolbarComponents()).length;
+    const size: number[] = session.toolbarSize();
     const scale: number = session.toolbarScale();
-    const width: number = FloatingToolbarLayout.widthVp(count) * scale * this.density;
-    const height: number = FloatingToolbarLayout.heightVp() * scale * this.density;
+    const width: number = size[0] * scale * this.density;
+    const height: number = size[1] * scale * this.density;
     const position: [number, number] = FloatingToolbarDragPolicy.position(
       this.toolbarDragOrigin, [offsetX, offsetY], this.density, this.screenWidth,
       this.screenHeight, width, height);
@@ -392,10 +396,11 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       ? KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
         KeyboardSession.shared.glossRows(), settings.candidateFontSize,
         settings.candidatePreeditFontSize, true)
-      : KeyboardMetrics.candidateHeightVp(settings.candidateLayout, this.candidateCount,
+      : (KeyboardMetrics.candidateHeightVp(settings.candidateLayout, this.candidateCount,
         settings.candidateShowPreedit, settings.candidateDecorationTopVp,
         KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-        settings.candidatePreeditFontSize);
+        settings.candidatePreeditFontSize, CandidateLayoutPolicy.gap(settings.candidateSkinLayout, true,
+        settings.candidateFontSize)) + CandidateCanvasPolicy.extraHeight(settings.candidateCanvas, settings.candidateShowPreedit));
     const widthVp: number = tall ? DESKTOP_SURFACE_WIDTH_VP : this.candidateWidthVp;
     await this.panel.resize(Math.round(widthVp * this.density),
       Math.round(heightVp * this.density));
@@ -517,10 +522,11 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     }
     const width: number = this.candidateWidthVp * this.density;
     const settings: KeyboardPreferences = KeyboardSession.shared.preferences();
-    const height: number = KeyboardMetrics.candidateHeightVp(settings.candidateLayout,
+    const height: number = (KeyboardMetrics.candidateHeightVp(settings.candidateLayout,
       this.candidateCount, settings.candidateShowPreedit,
       settings.candidateDecorationTopVp, KeyboardSession.shared.glossRows(),
-      settings.candidateFontSize, settings.candidatePreeditFontSize) * this.density;
+      settings.candidateFontSize, settings.candidatePreeditFontSize, CandidateLayoutPolicy.gap(settings.candidateSkinLayout, true,
+        settings.candidateFontSize)) + CandidateCanvasPolicy.extraHeight(settings.candidateCanvas, settings.candidateShowPreedit)) * this.density;
     const gap: number = KeyboardMetrics.CANDIDATE_WINDOW_GAP_VP * this.density;
     const anchor: CandidateAnchor = CandidateAnchorPolicy.position(settings.candidateFollowCursor,
       this.candidateAnchor, this.caret);
@@ -910,6 +916,8 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       KeyboardSession.shared.useVoiceContext(this.context);
       // 在该上下文的目录中读取内置音效包并写入变调音符。
       KeyboardSession.shared.useSoundContext(this.context);
+      // 随包的水杉娘表情包也解压在 resourceDir 下。
+      KeyboardSession.shared.mascotStickers.use(this.context.resourceDir);
       const started: boolean = KeyboardSession.shared.start(resources, state, systemDark);
       if (!started) {
         // 没有会话就不创建面板，避免系统显示无法响应的键盘。
@@ -964,10 +972,11 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         // 面板尺寸与视图布局使用同一组数值，避免裁掉最底行。
         const settings: KeyboardPreferences = KeyboardSession.shared.preferences();
         const heightVp: number = desktop
-          ? KeyboardMetrics.candidateHeightVp(settings.candidateLayout, 0,
+          ? (KeyboardMetrics.candidateHeightVp(settings.candidateLayout, 0,
             settings.candidateShowPreedit, settings.candidateDecorationTopVp,
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-            settings.candidatePreeditFontSize)
+            settings.candidatePreeditFontSize, CandidateLayoutPolicy.gap(settings.candidateSkinLayout, true,
+        settings.candidateFontSize)) + CandidateCanvasPolicy.extraHeight(settings.candidateCanvas, settings.candidateShowPreedit))
           // 刚创建时还没有组字也没有面板，工具条画不画只看工具栏设置，视图之后按同一条规则（`TouchToolbarPolicy`）改高度。
           : KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,

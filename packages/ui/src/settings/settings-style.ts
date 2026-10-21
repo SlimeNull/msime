@@ -71,9 +71,9 @@ export const externalDiagnostics =
   "mx-1 mt-2.5 text-xs wrap-anywhere text-muted [&>summary]:cursor-pointer [&>ul]:mt-[7px] [&>ul]:mb-0 [&>ul]:pl-5";
 export const externalResourceNote = "px-6 pt-0 pb-3";
 
-/** The theme page shows one card at a time: a horizontal scroll-snap track, so a trackpad or touch swipe moves between cards as well as the arrows do. */
+/** 主题页逐张显示卡片，横向滚动吸附保留触控板和触屏切换；卡片按自然高度排列，由轮播跟随当前卡片测量高度。 */
 export const themeCarouselTrack =
-  "flex snap-x snap-mandatory overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
+  "flex items-start snap-x snap-mandatory overflow-x-auto overflow-y-hidden overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
 /** The padding keeps the card's shadow and focus ring inside the track, which clips its overflow. */
 export const themeCarouselSlide = "w-full shrink-0 snap-start p-1";
 export const themeCarouselNav = "mt-2 flex items-center justify-center gap-3";
@@ -121,6 +121,31 @@ export const skinCardPreview =
 export const skinPreviewStage = "flex min-w-0 items-start overflow-hidden px-6 py-[9px]";
 /** A theme card's horizontal and vertical candidate stages side by side. Neither shrinks, so a card too narrow for both wraps the vertical one under the horizontal one instead of clipping either. */
 export const skinCandidateStages = "flex flex-wrap items-start [&>*]:max-w-full [&>*]:shrink-0";
+
+// ---- 「制作皮肤」编辑器 ----
+
+/** 编辑时一直看得见的预览：贴在内容区顶部，下面的表单从它底下滚过。 */
+/** 横排预览贴在内容区顶部，下面的表单从它底下滚过；竖排预览太高，贴住会挡掉半个窗口，所以跟着页面走。贴住的位置让开 macOS 窗口里同样贴在顶部的 52px 工具栏。分组底色在深色下是半透明的，叠在页面底色上才挡得住滚过去的内容。 */
+export const skinEditorPreview = (sticky: boolean) =>
+  `${sticky ? "sticky top-2 z-[5] mac:top-[60px]" : ""} flex flex-col gap-3 rounded-[var(--p-group-r)] border border-edge [background:linear-gradient(var(--p-group-bg),var(--p-group-bg)),var(--p-bg)] p-4 shadow-card linux:shadow-none`;
+export const skinEditorPreviewBar = "flex flex-wrap items-center justify-between gap-3";
+export const skinEditorPreviewModes =
+  "grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]";
+export const skinEditorPreviewCard =
+  "flex min-w-0 flex-col gap-1.5 overflow-hidden rounded-lg [&_[data-skin-preview]]:rounded-lg";
+export const skinEditorPreviewEmpty =
+  "flex min-h-24 min-w-0 flex-col justify-center gap-1.5 rounded-lg border border-dashed border-edge px-4 py-3";
+export const skinEditorPreviewLabel = "text-xs font-medium text-muted";
+export const skinEditorColor = "flex items-center gap-2";
+export const skinEditorHex = "settings-text-input w-[7.5rem] font-mono uppercase";
+export const skinEditorAlpha = "w-9 text-right text-xs tabular-nums [color:var(--p-sub)]";
+export const skinEditorContrast =
+  "m-0 grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1 text-[13px] [color:var(--p-sub)]";
+export const skinEditorContrastValue = (ok: boolean) =>
+  `m-0 text-right tabular-nums ${ok ? "" : "font-medium text-danger"}`;
+export const skinEditorActions = "flex flex-wrap items-center gap-3";
+export const skinEditorImageName = "max-w-48 truncate text-[13px] [color:var(--p-sub)]";
+export const skinEditorProblems = "m-0 flex flex-col gap-1 pl-5 text-[13px] text-danger";
 
 // ---- the floating toolbar editor ----
 
@@ -179,7 +204,7 @@ export const importPreview =
 
 export const field = compactFieldLabel;
 export const fieldInput =
-  "min-w-25 rounded-md border border-edge bg-[var(--dropdown-bg)] px-2 py-1.5 text-body";
+  "settings-field-input min-w-25 rounded-md border border-edge bg-[var(--dropdown-bg)] px-2 py-1.5 text-body";
 export const fieldSelect = `${fieldInput} min-w-[150px]`;
 export const dictionaryKindSelect = "min-w-44";
 export const dictionaryFooter =
@@ -257,7 +282,7 @@ export const windowIcon =
 export const macosDragRow =
   "settings-mac-drag-row sticky top-0 z-10 -mx-3 h-[52px] shrink-0 bg-[rgba(46,46,48,0.96)] light-theme:bg-[rgba(232,232,234,0.96)]";
 export const macosToolbar =
-  "settings-mac-toolbar sticky top-0 z-10 flex h-[52px] shrink-0 items-center gap-3.5 border-b border-[rgba(255,255,255,0.08)] bg-[rgba(31,31,33,0.82)] px-5 backdrop-blur-[20px] backdrop-saturate-[1.8] select-none light-theme:border-[rgba(0,0,0,0.07)] light-theme:bg-[rgba(242,242,244,0.82)] max-phone:pl-[88px] [&>h1]:m-0 [&>h1]:min-w-0 [&>h1]:truncate [&>h1]:text-[15px] [&>h1]:font-bold";
+  "settings-mac-toolbar sticky top-0 z-10 flex h-[52px] shrink-0 items-center gap-3.5 rounded-bl-[16px] border-b border-[rgba(255,255,255,0.08)] bg-[rgba(31,31,33,0.82)] px-5 backdrop-blur-[20px] backdrop-saturate-[1.8] select-none light-theme:border-[rgba(0,0,0,0.07)] light-theme:bg-[rgba(242,242,244,0.82)] max-phone:pl-[88px] [&>h1]:m-0 [&>h1]:min-w-0 [&>h1]:truncate [&>h1]:text-[15px] [&>h1]:font-bold";
 
 // ---- secret fields ----
 
@@ -370,7 +395,7 @@ export const mobileTabIcon =
 
 /** 桌面设置页的顶部功能标签，沿用当前平台的分段控件配色。 */
 export const candidateTabs =
-  "grid grid-flow-col auto-cols-fr gap-0.5 rounded-[var(--p-seg-r)] bg-[var(--p-seg-bg)] p-0.5 [border:var(--p-seg-border)] [&>button]:min-h-9 [&>button]:rounded-[var(--p-seg-item-r)] [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-2 [&>button]:text-sm [&>button]:[color:var(--p-text)] [&>button[aria-selected=true]]:bg-[var(--p-seg-on)] [&>button[aria-selected=true]]:[color:var(--p-seg-on-fg)] [&>button[aria-selected=true]]:[box-shadow:var(--p-seg-on-shadow)] [&>button:focus-visible]:outline-2 [&>button:focus-visible]:outline-offset-1 [&>button:focus-visible]:outline-accent";
+  "flex overflow-x-auto gap-0.5 [&>button]:min-w-max [&>button]:flex-1 [&>button]:whitespace-nowrap rounded-[var(--p-seg-r)] bg-[var(--p-seg-bg)] p-0.5 [border:var(--p-seg-border)] [&>button]:min-h-9 [&>button]:rounded-[var(--p-seg-item-r)] [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-2 [&>button]:text-sm [&>button]:[color:var(--p-text)] [&>button[aria-selected=true]]:bg-[var(--p-seg-on)] [&>button[aria-selected=true]]:[color:var(--p-seg-on-fg)] [&>button[aria-selected=true]]:[box-shadow:var(--p-seg-on-shadow)] [&>button:focus-visible]:outline-2 [&>button:focus-visible]:outline-offset-1 [&>button:focus-visible]:outline-accent";
 
 /** 维护页只有两个入口，使用紧凑的分段控件，避免标签横向铺满内容区。 */
 export const maintenanceTabs =
@@ -384,6 +409,6 @@ export const dictionaryNavEyebrow =
   "text-[11px] font-semibold uppercase tracking-[0.12em] text-accent";
 export const dictionaryNavDescription = "text-xs text-muted";
 export const dictionaryTabs =
-  "grid min-w-[390px] flex-1 grid-flow-col auto-cols-fr gap-1 bg-transparent sm:max-w-[480px] sm:min-w-0 [&>button]:relative [&>button]:min-h-9 [&>button]:rounded-md [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-3 [&>button]:text-sm [&>button]:font-medium [&>button]:text-muted [&>button]:transition-colors [&>button:hover]:bg-[var(--p-hover)] [&>button[aria-selected=true]]:bg-[var(--p-seg-on)] [&>button[aria-selected=true]]:text-[var(--p-seg-on-fg)] [&>button[aria-selected=true]]:shadow-[0_1px_2px_rgba(0,0,0,0.08)] [&>button:focus-visible]:outline-2 [&>button:focus-visible]:outline-offset-2 [&>button:focus-visible]:outline-accent max-phone:min-w-0 max-phone:w-full";
+  "grid w-auto min-w-0 max-w-full flex-none grid-flow-col auto-cols-fr gap-0.5 rounded-[var(--p-seg-r)] bg-[var(--p-seg-bg)] p-0.5 [border:var(--p-seg-border)] [&>button]:min-h-9 [&>button]:min-w-24 [&>button]:rounded-[var(--p-seg-item-r)] [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-3 [&>button]:text-sm [&>button]:font-medium [&>button]:whitespace-nowrap [&>button]:[color:var(--p-text)] [&>button]:transition-colors [&>button:hover]:bg-[var(--p-hover)] [&>button[aria-selected=true]]:bg-[var(--p-seg-on)] [&>button[aria-selected=true]]:[color:var(--p-seg-on-fg)] [&>button[aria-selected=true]]:[box-shadow:var(--p-seg-on-shadow)] [&>button:focus-visible]:outline-2 [&>button:focus-visible]:outline-offset-1 [&>button:focus-visible]:outline-accent max-phone:w-full";
 export const cloudDictionaryEmbed =
   "min-w-0 rounded-[var(--p-group-r)] border border-edge bg-[var(--p-group-bg)] shadow-[var(--p-group-shadow)] [&>main]:w-full [&>main]:min-h-0 [&>main]:bg-transparent [&_.native-panel-header]:hidden [&>main>div]:min-h-0 [&>main>div]:overflow-visible [&>main>div]:p-5 [&>main>div]:max-phone:p-4";

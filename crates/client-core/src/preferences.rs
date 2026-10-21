@@ -667,11 +667,11 @@ pub enum AppInputModeRule {
     English,
 }
 
-/// 「应用例外」的条目上限与应用标识的字节上限。规则表进 Windows Server 的偏好快照和 iOS 桥接的偏好文档（都是整份 16KiB 上限），32 条、每条 64 字节以内最多约 2.6KB；bundle id 和程序文件名很少超过 64 字节。
+/// 「应用例外」的条目上限与应用标识的字节上限。规则表进 Windows Server 的偏好快照和 iOS 桥接的偏好文档；32 条、每条 64 字节以内最多约 2.6KB，bundle id 和程序文件名很少超过 64 字节。
 pub const MAX_APP_INPUT_MODE_RULES: usize = 32;
 pub const MAX_APP_INPUT_MODE_RULE_ID_BYTES: usize = 64;
 
-/// 应用标识：macOS 是 bundle id，Windows 是进程的可执行文件基名（如 `code.exe`，设置页写入前转成小写）。非空、不超过 `MAX_APP_INPUT_MODE_RULE_ID_BYTES` 字节，不含控制字符和路径分隔符，两侧没有空白；整张表按 ASCII 不分大小写地不重复，因为 Windows 按这个规则比较进程名，只差大小写的两条会让同一个进程拿到两种模式。
+/// 应用标识：macOS 是 bundle id，Windows 是进程的可执行文件基名（如 `code.exe`，设置页写入前转成小写），Linux 是输入法框架报告的程序名（如 `firefox`）。非空、不超过 `MAX_APP_INPUT_MODE_RULE_ID_BYTES` 字节，不含控制字符和路径分隔符，两侧没有空白；整张表按 ASCII 不分大小写地不重复，因为 Windows 按这个规则比较进程名，只差大小写的两条会让同一个进程拿到两种模式。
 fn valid_app_input_mode_rules(rules: &BTreeMap<String, AppInputModeRule>) -> bool {
     let mut seen = BTreeSet::new();
     rules.len() <= MAX_APP_INPUT_MODE_RULES
@@ -849,7 +849,7 @@ pub struct Preferences {
     pub default_ime_mode: DefaultImeMode,
     #[serde(default)]
     pub ime_mode_scope: ImeModeScope,
-    /// 应用例外：切到这些应用时从固定的中文或英文开始，优先于按应用记忆、全局状态和 `default_ime_mode`，在全局作用域下同样生效；用户在应用里手动切换后，本次停留期间让位，离开再回来重新生效。macOS 按 bundle id、Windows 按进程基名查找。没有规则时不写进文档，没有这个键的旧版本照样能读。
+    /// 应用例外：切到这些应用时从固定的中文或英文开始，优先于按应用记忆、全局状态和 `default_ime_mode`，在全局作用域下同样生效；用户在应用里手动切换后，本次停留期间让位，离开再回来重新生效。macOS 按 bundle id、Windows 按进程基名、Linux 按输入法框架报告的程序名查找。没有规则时不写进文档，没有这个键的旧版本照样能读。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub app_input_mode_rules: BTreeMap<String, AppInputModeRule>,
     #[serde(default)]
@@ -1136,9 +1136,12 @@ pub struct Preferences {
         skip_serializing_if = "CloudClipboardRelayPreferences::is_default"
     )]
     pub cloud_clipboard_relay: CloudClipboardRelayPreferences,
-    /// 向云候选服务多要一条候选。它会把正在组的拼写发给 `https://inputtools.google.com`，所以新装默认关闭（见 `Default`）；已存文档缺这个字段时读成开启，升级沿用原来的行为。
+    /// 向所选云候选服务发送当前组字。新装默认关闭；旧文档缺开关时沿用开启行为。
     #[serde(default = "enabled_by_default")]
     pub cloud_candidates: bool,
+    /// 本机云候选来源与 HTTP 配置，不参与设置导出和账号同步。
+    #[serde(default)]
+    pub cloud_candidate_provider: crate::cloud::candidates::CloudCandidatePreferences,
     /// 新装默认关闭候选翻译；旧文档缺字段时仍沿用原有开启行为，显式保存的选择不变。
     #[serde(default = "enabled_by_default")]
     pub candidate_translations: bool,
@@ -1496,7 +1499,7 @@ pub struct FloatingToolbarPreferences {
     pub enabled: bool,
     #[serde(default = "enabled_by_default")]
     pub english_mode: bool,
-    /// 切换输入方案的按钮：点开列出全拼、双拼、五笔、粤拼、注音等方案。默认开启——在 macOS 27 上粤、注这类菜单栏入口只能由用户自己去系统设置里添加，这个按钮让不加入口也能切换。macOS 和 Windows 的工具栏画它（见 `HostCapabilities::floating_toolbar_input_scheme`）。
+    /// 切换输入方案的按钮：点开列出全拼、双拼、五笔、粤拼、注音等方案。默认开启——在 macOS 27 上粤、注这类菜单栏入口只能由用户自己去系统设置里添加，这个按钮让不加入口也能切换。macOS、Windows 和 Linux 的悬浮工具栏画它，Linux 的「工具栏」子菜单也列出它（见 `HostCapabilities::floating_toolbar_input_scheme`）。
     #[serde(default = "enabled_by_default")]
     pub input_scheme: bool,
     #[serde(default = "default_toolbar_scale")]
@@ -1912,7 +1915,7 @@ pub struct AchievementPreferences {
     pub enabled: bool,
 }
 
-/// 中英混输的默认触发字符数：拼写达到这个长度才补英文候选。调低会让常见简拼被英文词抢走首选（见 `.agents/notes/implemented/feature/2026-10-12-mixed-english-leads-unsegmentable-input.md`）；不读偏好的宿主固定用它（`HostPlatform::reads_mixed_input_minimum_prefix`）。
+/// 中英混输默认的补全与英文领先门槛；26 键中更短的完整词仍可选。调低会让常见简拼被英文词抢走首选（见 `.agents/notes/implemented/feature/2026-10-12-mixed-english-leads-unsegmentable-input.md`）；不读偏好的宿主固定用它（`HostPlatform::reads_mixed_input_minimum_prefix`）。
 pub const DEFAULT_MIXED_INPUT_MINIMUM_PREFIX: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2139,10 +2142,10 @@ pub struct NavigationPreferences {
     pub mouse_wheel: bool,
     #[serde(alias = "candidate_arrow_navigation")]
     pub arrows: bool,
-    /// 不带修饰键的左右方向键：光标已经停在输入串的这一端、编辑器动不了它时，改成移动候选高亮（左是上一个、右是下一个）；光标还能移动时照旧编辑输入串。与 `arrows` 各自独立，默认关闭。
+    /// 不带修饰键的左右方向键在横排候选窗里移动候选高亮（左是上一个、右是下一个）。高亮在首选时 ← 照旧编辑输入串，→ 在光标没到输入串末尾时照旧往末尾移，到了末尾才选下一个；高亮不在首选时左右键只移动候选。桌面候选窗竖排（`candidate_layout`）时左右键与候选方向垂直，只编辑输入串；触屏的候选栏总是横排。与 `arrows` 各自独立，默认开启。
     ///
     /// 判断放在 `input-runtime` 里而不是每个宿主各写一遍：宿主只把左右键当普通光标命令发下去，端点判断和高亮移动跟着 ↑/↓ 的那段代码一起走。
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default = "enabled_by_default")]
     pub left_right: bool,
 }
 
@@ -2156,7 +2159,7 @@ impl Default for NavigationPreferences {
             page_up_down: true,
             mouse_wheel: false,
             arrows: true,
-            left_right: false,
+            left_right: true,
         }
     }
 }
@@ -2467,6 +2470,7 @@ impl Default for Preferences {
             cloud_clipboard_relay: CloudClipboardRelayPreferences::default(),
             // 会把输入内容发出设备的两条路径新装都关闭，由 Windows、macOS、Linux 的首次询问或各平台的设置开关打开。
             cloud_candidates: false,
+            cloud_candidate_provider: Default::default(),
             candidate_translations: false,
             candidate_english_gloss: false,
             candidate_pronunciation: false,
@@ -2810,7 +2814,7 @@ pub const ASR_PROVIDERS: [&str; 9] = [
 /// OpenAI-compatible AI services exposed by the Apple settings surface and
 /// shared by every host. Providers that need special request fields are still
 /// handled in `ai.rs`; the rest use the common Chat Completions shape.
-pub const AI_PROVIDERS: [&str; 12] = [
+pub const AI_PROVIDERS: [&str; 13] = [
     "everyapi",
     "openai",
     "anthropic",
@@ -2822,6 +2826,7 @@ pub const AI_PROVIDERS: [&str; 12] = [
     "siliconflow",
     "groq",
     "openrouter",
+    "ollama",
     "custom",
 ];
 /// Polishing additionally supports DeepSeek, which offers no recognition.
@@ -2909,6 +2914,7 @@ impl Preferences {
 
         // 中继的地址和令牌成对保留，理由与上面的服务地址相同。
         next.cloud_clipboard_relay = self.cloud_clipboard_relay.clone();
+        next.cloud_candidate_provider = self.cloud_candidate_provider.clone();
 
         next.fuzzy_pinyin.seeded = self.fuzzy_pinyin.seeded;
 
@@ -2996,6 +3002,8 @@ impl Preferences {
                 cursor = next;
             }
         }
+        // 自定义地址、请求头和模板都可能含不以敏感词命名的令牌，整组不进入诊断。
+        value["cloud_candidate_provider"] = REDACTED.into();
         redact_sensitive_keys(&mut value);
         for pointer in DIAGNOSTIC_ENDPOINTS {
             if let Some(slot) = value.pointer_mut(pointer) {
@@ -3008,6 +3016,9 @@ impl Preferences {
     }
 
     pub fn validate(&self) -> Result<(), PreferencesError> {
+        if !self.cloud_candidate_provider.validate() {
+            return Err(PreferencesError::InvalidCloudCandidateProvider);
+        }
         if !crate::clipboard::CLIPBOARD_HISTORY_LIMITS.contains(&self.clipboard_history_limit) {
             return Err(PreferencesError::InvalidClipboardHistoryLimit);
         }
@@ -3269,6 +3280,10 @@ pub enum PreferencesError {
     InvalidAppInputModeRules,
     #[error("cloud clipboard relay needs an https address (http only for loopback) without query, fragment or credentials, and a token of 16-256 printable ASCII characters")]
     InvalidCloudClipboardRelay,
+    #[error(
+        "云候选配置无效：请检查地址、方法、请求头、JSON 模板、响应路径和超时（100–10000 毫秒）"
+    )]
+    InvalidCloudCandidateProvider,
     #[error("clipboard history limit must be one of 50, 100, 200, 500 or 1000")]
     InvalidClipboardHistoryLimit,
     #[error("preferences changed; reload before saving")]

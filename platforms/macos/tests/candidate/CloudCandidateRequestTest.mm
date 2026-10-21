@@ -77,6 +77,43 @@ static void Wait(BOOL (^done)(void)) {
     assert(done());
 }
 
+static void TestCustomCloudTransport() {
+    NSDictionary *descriptor = @{@"url":@"https://cloud.example.invalid/api?q=synthetic", @"method":@"POST",
+        @"headers":@{@"Authorization":@"Bearer synthetic", @"Content-Type":@"application/json"},
+        @"body_utf8":@"{\"query\":\"nihao\"}", @"timeout_ms":@200, @"connect_timeout_ms":@200,
+        @"max_response_bytes":@262144};
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.protocolClasses = @[SyntheticCloudProtocol.class];
+    __block BOOL done = NO;
+    ResponseBytes = 8; ResponseStatus = 200;
+    MSIMECloudCandidateRequest *request = [[MSIMECloudCandidateRequest alloc] initWithCloudDescriptor:descriptor
+        configuration:configuration completion:^(NSData *body) { assert(body.length == 8); done = YES; }];
+    NSURLRequest *prepared = [request valueForKey:@"translationRequest"];
+    assert([prepared.HTTPMethod isEqual:@"POST"] && prepared.timeoutInterval == 0.2);
+    assert([[prepared valueForHTTPHeaderField:@"Authorization"] isEqual:@"Bearer synthetic"]);
+    assert([prepared.HTTPBody isEqual:[descriptor[@"body_utf8"] dataUsingEncoding:NSUTF8StringEncoding]]);
+    [request start]; Wait(^BOOL { return done; });
+    NSMutableDictionary *cached = [descriptor mutableCopy];
+    cached[@"cached_response"] = @"{\"candidates\":[{\"text\":\"合成缓存\"}]}";
+    NSUInteger loaded = LoadedURLs.count;
+    done = NO;
+    request = [[MSIMECloudCandidateRequest alloc] initWithCloudDescriptor:cached configuration:configuration
+        completion:^(NSData *body) { assert([body isEqual:[cached[@"cached_response"] dataUsingEncoding:NSUTF8StringEncoding]]); done = YES; }];
+    [request start]; assert(done && LoadedURLs.count == loaded && ![request valueForKey:@"session"]);
+    for (NSDictionary *override in @[@{@"url":@"http://public.example.invalid/api"}, @{@"url":@"https://user:secret@cloud.example.invalid/"},
+        @{@"url":@"https://cloud.example.invalid/api#fragment"}, @{@"method":@"DELETE"}, @{@"timeout_ms":@0}]) {
+        NSMutableDictionary *invalid = [descriptor mutableCopy]; [invalid addEntriesFromDictionary:override];
+        __block BOOL refused = NO;
+        request = [[MSIMECloudCandidateRequest alloc] initWithCloudDescriptor:invalid configuration:configuration
+            completion:^(NSData *body) { assert(!body); refused = YES; }];
+        [request start]; assert(refused && ![request valueForKey:@"session"]);
+    }
+    RedirectMode = YES; done = NO;
+    request = [[MSIMECloudCandidateRequest alloc] initWithCloudDescriptor:descriptor configuration:configuration
+        completion:^(NSData *body) { assert(!body); done = YES; }];
+    [request start]; Wait(^BOOL { return done; }); RedirectMode = NO;
+}
+
 static void TestTranslationTransport() {
     NSDictionary *descriptor = @{@"url":@"https://translation.invalid/api", @"method":@"POST", @"headers":@{@"Content-Type":@"application/json", @"Authorization":@"Bearer synthetic"},
         @"body":@{@"text":@"hello", @"source_lang":@"EN", @"target_lang":@"ZH"}, @"timeout_ms":@2500, @"max_response_bytes":@1048576};
@@ -189,6 +226,24 @@ static void TestAIRejectsPlainHTTP() {
         mutableDescriptor[@"url"] = refused;
         request = [[MSIMECloudCandidateRequest alloc]
             initWithAITranslationDescriptor:mutableDescriptor
+            configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration
+            completion:^(NSData *body) { assert(!body); }];
+        assert(![request valueForKey:@"translationRequest"]);
+    }    // Ollama 不鉴权，描述符只带 Content-Type；带了 Authorization 就必须是 Bearer。
+    NSMutableDictionary *tokenless = [descriptor mutableCopy];
+    tokenless[@"url"] = @"http://localhost:11434/v1/chat/completions";
+    tokenless[@"headers"] = @{@"Content-Type":@"application/json"};
+    request = [[MSIMECloudCandidateRequest alloc]
+        initWithAITranslationDescriptor:tokenless
+        configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration
+        completion:^(NSData *body) { assert(!body); }];
+    NSURLRequest *tokenlessRequest = [request valueForKey:@"translationRequest"];
+    assert(tokenlessRequest && ![tokenlessRequest valueForHTTPHeaderField:@"Authorization"]);
+    for (NSDictionary *refusedHeaders in @[@{@"Content-Type":@"application/json", @"Authorization":@"Basic synthetic"},
+                                           @{@"Content-Type":@"application/json", @"X-Other":@"synthetic"}]) {
+        tokenless[@"headers"] = refusedHeaders;
+        request = [[MSIMECloudCandidateRequest alloc]
+            initWithAITranslationDescriptor:tokenless
             configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration
             completion:^(NSData *body) { assert(!body); }];
         assert(![request valueForKey:@"translationRequest"]);
@@ -308,6 +363,7 @@ static void TestSharedSessionTransport() {
 }
 int main() {
     @autoreleasepool {
+        TestCustomCloudTransport();
         TestTranslationTransport();
         TestAIRejectsPlainHTTP();
         TestTencentTransport();

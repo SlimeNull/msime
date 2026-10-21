@@ -1,4 +1,4 @@
-#include "CandidateItemLayout.h"
+#include "../../../../shared/candidate/CandidateItemLayout.h"
 
 #include <cassert>
 #include <cmath>
@@ -11,9 +11,9 @@ bool Near(double value, double expected)
     return std::fabs(value - expected) < 0.001;
 }
 
-msime::mac::CandidateLayoutMetrics Metrics()
+msime::candidate::CandidateLayoutMetrics Metrics()
 {
-    msime::mac::CandidateLayoutMetrics metrics;
+    msime::candidate::CandidateLayoutMetrics metrics;
     metrics.candidateRow = 32.0;
     metrics.chrome = 30.0;
     metrics.annotationGap = 4.0;
@@ -26,7 +26,7 @@ msime::mac::CandidateLayoutMetrics Metrics()
 
 int main()
 {
-    using namespace msime::mac;
+    using namespace msime::candidate;
     const CandidateLayoutMetrics metrics = Metrics();
 
     // Text that fits keeps one row and nothing wraps; short runs share its line.
@@ -120,6 +120,23 @@ int main()
         assert(Near(CandidatePageHeight(rows), 176.0));
     }
 
+    // A skin layout contributes the shared inter-item gap and horizontal minimum cell width without changing the legacy defaults.
+    {
+        auto skinned = Metrics();
+        skinned.itemGap = 6.0;
+        skinned.itemMinWidth = 90.0;
+        const auto rows = LayoutCandidatePage({{30.0}, {40.0}}, 220.0, skinned, true);
+        assert(Near(rows[0].width, 90.0) && Near(rows[1].x, 96.0) && Near(rows[1].width, 90.0));
+        assert(Near(CandidatePageHeight(rows), 32.0));
+        const auto vertical = LayoutCandidatePage({{30.0}, {40.0}}, 220.0, skinned, false);
+        assert(Near(vertical[1].y, vertical[0].height + 6.0));
+
+        // Windows 横排在 itemGap 之外固定增加 6 DIP；旧调用未设置 columnGap 时仍回退到 itemGap。
+        skinned.columnGap = 12.0;
+        const auto spaced = LayoutCandidatePage({{30.0}, {40.0}}, 240.0, skinned, true);
+        assert(Near(spaced[1].x, 102.0));
+    }
+
     // A horizontal page runs natural-width columns left to right and breaks the line when the next would pass its end; every column on a line takes the line's tallest height, and the minimum reserves room for a gloss.
     {
         const std::vector<CandidateItemWidths> items{{100.0, 0.0, 20.0}, {50.0}, {80.0}};
@@ -169,6 +186,37 @@ int main()
         assert(Near(CandidateCardMinimumWidth(32.0, 0.0, 720.0), 224.0));
         // The skin's own floor is not clamped by the cap.
         assert(Near(CandidateCardMinimumWidth(16.0, 300.0, 90.0), 300.0));
+    }
+    // 共享版式使用 DIP 下限；收紧保留包下限，原生主题继续按字号计算。
+    {
+        assert(Near(CandidateCardMinimumWidth(32.0, 0.0, 720.0, false), 160.0));
+        assert(Near(CandidateCardMinimumWidth(16.0, 0.0, 720.0, false, 2.0), 320.0));
+        assert(Near(CandidateCardMinimumWidth(16.0, 0.0, 90.0, false), 90.0));
+        assert(Near(CandidateCardMinimumWidth(32.0, 0.0, 720.0, true), 0.0));
+        assert(Near(CandidateCardMinimumWidth(16.0, 300.0, 90.0, true), 300.0));
+        assert(Near(CandidateCardMinimumWidth(16.0, 200.0, 90.0, false), 200.0));
+    }
+
+    // 均分只扩展可见列，保留列间距，换行后每行单独贴到右缘。
+    {
+        auto justified = metrics;
+        justified.justifyRows = true;
+        justified.columnGap = 6.0;
+        const auto single = LayoutCandidatePage({{60.0}, {30.0}}, 250.0, justified, true);
+        assert(Near(single[0].width, 137.0) && Near(single[1].width, 107.0));
+        assert(Near(single[1].x, 143.0) && Near(single[1].x + single[1].width, 250.0));
+        const auto lines = LayoutCandidatePage({{100.0}, {50.0}, {40.0}}, 250.0, justified, true);
+        assert(Near(lines[0].width, 147.0) && Near(lines[1].width, 97.0));
+        assert(Near(lines[1].x + lines[1].width, 250.0));
+        assert(Near(lines[2].x, 0.0) && Near(lines[2].width, 250.0) && lines[2].y > 0.0);
+        const auto hidden = LayoutCandidatePage({{60.0}, {}, {30.0}}, 250.0, justified, true);
+        assert(Near(hidden[1].width, 0.0));
+        assert(Near(hidden[2].x + hidden[2].width, 250.0));
+        const auto empty = LayoutCandidatePage({{}, {}}, 250.0, justified, true);
+        assert(Near(empty[0].width, 0.0) && Near(empty[1].width, 0.0));
+        const auto vertical = LayoutCandidatePage({{60.0}, {30.0}}, 250.0, justified, false);
+        const auto original = LayoutCandidatePage({{60.0}, {30.0}}, 250.0, metrics, false);
+        assert(Near(vertical[0].width, original[0].width) && Near(vertical[1].y, original[1].y));
     }
     return 0;
 }

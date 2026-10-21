@@ -256,6 +256,7 @@ TEXT_ENTRY(DictionaryManifest, msime_client_dictionary_manifest)
 TEXT_ENTRY(NineKeyShuangpinLayout, msime_client_nine_key_shuangpin_layout)
 TEXT_ENTRY(SkinResource, msime_client_skin_resource)
 TEXT_ENTRY(SkinToolbarStylesheet, msime_client_skin_toolbar_stylesheet)
+TEXT_ENTRY(SkinToolbarImageLayout, msime_client_skin_toolbar_image_layout)
 TEXT_ENTRY(KeyboardSkinTrial, msime_client_keyboard_skin_trial)
 TEXT_ENTRY(Dictionary, msime_client_dictionary)
 TEXT_ENTRY(TypingStatistics, msime_client_typing_statistics)
@@ -564,6 +565,11 @@ static napi_value TypingStatisticsAsync(napi_env env, napi_callback_info info) {
 // validation and replacement off the ArkTS thread so a large folder cannot freeze settings.
 static napi_value SkinImport(napi_env env, napi_callback_info info) {
     return queueRequest(env, info, msime_client_skin_import, "MSIME skin import");
+}
+
+// 「制作皮肤」要解码最多 2 MiB 的图片、在临时目录或皮肤目录里写包并整体替换，放到 ArkTS 线程之外运行。
+static napi_value CandidateSkinEditor(napi_env env, napi_callback_info info) {
+    return queueRequest(env, info, msime_client_candidate_skin_editor, "MSIME candidate skin editor");
 }
 
 // Named dictionaries: an import parses up to 16 MiB of text and every operation rewrites the collection files under their lock, so the settings page runs them on a worker and awaits the promise. The keyboard's small flush uses the synchronous `dictionaryCollections`.
@@ -1657,8 +1663,10 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("dictionaryManifest", DictionaryManifest),
         ENTRY("nineKeyShuangpinLayout", NineKeyShuangpinLayout),
         ENTRY("skinResource", SkinResource),
+        ENTRY("skinToolbarImageLayout", SkinToolbarImageLayout),
         ENTRY("skinToolbarStylesheet", SkinToolbarStylesheet),
         ENTRY("skinImport", SkinImport),
+        ENTRY("candidateSkinEditor", CandidateSkinEditor),
         ENTRY("customSkinLibrary", CustomSkinLibrary),
         ENTRY("keyboardSkinTrial", KeyboardSkinTrial),
         ENTRY("communityResourceLibrary", CommunityResourceLibrary),

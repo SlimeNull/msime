@@ -604,7 +604,8 @@ void ReplyComposer::confirm_delivery(uint64_t client, uint64_t epoch,
 }
 std::optional<PendingReply> ReplyComposer::select_candidate(ServerSession &session,
     uint64_t expected_session, uint64_t generation, size_t index,
-    uint64_t translation_page, bool continuation_supported) {
+    uint64_t translation_page, bool continuation_supported,
+    const std::optional<std::string> &expanded_text) {
   if (pending_ || !session.input_enabled()) return std::nullopt;
   traditional_output_ = traditional_projection(session);
   const auto view = session.view();
@@ -617,6 +618,8 @@ std::optional<PendingReply> ReplyComposer::select_candidate(ServerSession &sessi
     return std::nullopt;
   // A pick made here would leave the TIP's own host session behind (scheme::KeyboardOnlyCandidateList).
   if (scheme::KeyboardOnlyCandidateList(view_scheme(view)))
+    return std::nullopt;
+  if (expanded_text && translation_page_active_)
     return std::nullopt;
   // 鼠标点选上屏的是候选本身，预选的释义列随之作废：选中后送达的 view 不带列号，候选窗不再画下划线，留着它会让下一个空格、数字上屏用户看不到的那一列。
   armed_gloss_column_ = 0;
@@ -645,17 +648,28 @@ std::optional<PendingReply> ReplyComposer::select_candidate(ServerSession &sessi
   }
   bool found = false;
   std::string selected_candidate;
-  for (const auto &candidate : view.at("candidates")) {
+  uint8_t selected_source = 0;
+  // 网格里的候选在完整列表里找；这一代的尾部在展开时已经放出来了，所以这里取到的仍是同一代。
+  const auto all = expanded_text ? session.all_candidates(epoch_) : nlohmann::json();
+  const auto &listed = expanded_text ? all : view;
+  if (expanded_text && listed.at("generation") != generation)
+    return std::nullopt;
+  for (const auto &candidate : listed.at("candidates")) {
     const auto &id = candidate.at("id");
     if (id.at("session") == expected_session &&
         id.at("generation") == generation && id.at("index") == index) {
       found = true;
       selected_candidate = candidate.at("text").get<std::string>();
+      selected_source = candidate.value("source", uint8_t{});
     }
   }
-  if (!found)
+  if (!found || (expanded_text && simplified_to_traditional(selected_candidate,
+                                                            traditional_output_) !=
+                                      *expanded_text))
     return std::nullopt;
-  auto transition = session.select(epoch_, generation, index);
+  auto transition = expanded_text
+                        ? session.select_any(epoch_, generation, index, selected_source)
+                        : session.select(epoch_, generation, index);
   const auto &commit = transition.at("commit");
   const auto delta =
       commit.is_null() ? std::string{} : commit.get<std::string>();
@@ -1188,6 +1202,17 @@ std::optional<PendingReply> ReplyComposer::configured_key(
                     (packet.modifiers_down & FanyImePipeFlags::UiLess) != 0);
   if (!composing)
     return std::nullopt;
+  // Home 和 End（不带修饰键，或者只带 Shift：TIP 对 Shift+Home、Shift+End 的分类和不带修饰键时一样）。候选窗显示时 TIP 给自己的宿主会话发命令：Home 是 MSIME_FIRST_CANDIDATE_OR_HOME（高亮不在首选时回到首选，已在首选时把光标移到输入串开头），End 是 MSIME_LAST_CANDIDATE（跳到末选，没有两段式）。这边的会话经 translate_key 发同一条命令，两边才一致；没有候选时 TIP 不动组字（Home 见 tsf/HostComposition.h 的 HostHomeCommand，End 的 MSIME_LAST_CANDIDATE 在没有候选时什么也不做），这里也只应答，不动会话。以前这两个键在这里没有路由，返回空让 SessionPump 当作派发失败。TIP 重画组字时按请求号读回复（UI-less 读候选页，拼音预编辑样式读预编辑），所以回复和编辑键的规则相同：UI-less 或非 Local 样式回 Composition，否则不回包。
+  if ((packet.keycode == 0x24 || packet.keycode == 0x23) &&
+      (PipeMetadata::key_modifiers(packet.modifiers_down) & ~1u) == 0) {
+    const bool uiless = (packet.modifiers_down & FanyImePipeFlags::UiLess) != 0;
+    const auto path = uiless || style != TsfPreeditStyle::Local ? ReplyPath::Composition : ReplyPath::NoReply;
+    if (!current.at("candidates").empty())
+      return dispatch(session, packet, epoch, path, uiless);
+    return stage({client_, epoch_, packet.request_id, true,
+                  {{"handled", true}, {"commit", nullptr}, {"diagnostic", nullptr}, {"view", current}}},
+                 path, uiless);
+  }
   return navigate(session, packet, epoch, bindings);
 }
 } // namespace msime::windows

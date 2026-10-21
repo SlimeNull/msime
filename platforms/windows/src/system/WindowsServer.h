@@ -31,6 +31,9 @@ public:
   std::optional<CandidatePresentation> candidate_view() {
     return controller_->candidate_view();
   }
+  bool candidate_lease_current(const FocusLease &lease) const {
+    return controller_->candidate_lease_current(lease);
+  }
   void wait_candidate_render_for_key(const FocusLease &lease,
                                      const FanyImeNamedpipeData &packet) {
     controller_->wait_candidate_render_for_key(lease, packet);
@@ -45,9 +48,14 @@ public:
   }
   SelectionRequestResult request_selection(const FocusLease &lease,
       uint64_t session, uint64_t generation, size_t index,
-      uint64_t translation_page) {
+      uint64_t translation_page,
+      const std::optional<std::string> &expanded_text = std::nullopt) {
     return controller_->request_selection(lease, session, generation, index,
-                                          translation_page);
+                                          translation_page, expanded_text);
+  }
+  // 卷轴展开的开与关；见 SessionController。
+  void set_candidate_expansion(const FocusLease &lease, bool open) {
+    controller_->set_candidate_expansion(lease, open);
   }
   CandidateActionRequestResult request_candidate_action(
       const FocusLease &lease, uint64_t session, uint64_t generation,

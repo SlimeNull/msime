@@ -6,7 +6,7 @@
 //!
 //! Every colour this module emits is `#RRGGBB` or `#RRGGBBAA` (uppercase, alpha last). A `None` slot means "the host's own platform token for that slot", never "transparent".
 
-use super::catalog::{CandidatePalette, SkinSummary};
+use super::catalog::{CandidatePalette, ResolvedSkinLayout, SkinSummary};
 use crate::host_surface::HostPlatform;
 use crate::preferences::{CandidateLayout, CustomTheme, TouchKeyboardSkinDesign};
 use crate::theme::{readable_text, rgb};
@@ -66,6 +66,8 @@ pub struct ThemePackage {
     pub light: Option<CandidatePalette>,
     /// `None` when the package does not declare dark support.
     pub dark: Option<CandidatePalette>,
+    /// Windows 基底皮肤的出厂版式继承结果；非 Windows 基底为 `None`。
+    pub resolved_layout: Option<ResolvedSkinLayout>,
 }
 
 impl From<&SkinSummary> for ThemePackage {
@@ -89,6 +91,7 @@ impl From<&SkinSummary> for ThemePackage {
             layouts,
             light: declared("light").then(|| summary.candidate.light.clone()),
             dark: declared("dark").then(|| summary.candidate.dark.clone()),
+            resolved_layout: summary.resolved_layout.clone(),
         }
     }
 }
@@ -100,7 +103,7 @@ impl ThemePackage {
             .is_none_or(|appearance| (appearance == ThemeAppearance::Dark) == dark)
     }
 
-    /// Read one entry of the published `candidate_skin_catalog` (see `catalog::host_candidate_catalog`). That entry carries a palette for exactly the modes the package declares, so a missing mode reads as undeclared. Its `title`, decoration and corner radius keys are not theme colours and are ignored. The entry is read strictly: an unknown key anywhere, a missing `layouts`, a `base` that is not `system` or a built-in theme (as `catalog::scan` refuses the manifest) or an unsafe id is refused. In particular a `SkinSummary` from `msime_client_skin_catalog`, whose keys are camelCase (`showSelectedBar`, `minWidthDip`, `themes`), is not an entry and is refused rather than read with its selection bar and declared modes silently lost; hosts that scan the skin root pass `skins_directory` instead.
+    /// Read one entry of the published `candidate_skin_catalog` (see `catalog::host_candidate_catalog`). That entry carries a palette for exactly the modes the package declares, so a missing mode reads as undeclared. Its `title`, decoration, corner radius, row radius, background and toolbar keys are not candidate theme colours and are ignored. The entry is read strictly: an unknown key anywhere, a missing `layouts`, a `base` that is not `system` or a built-in theme (as `catalog::scan` refuses the manifest) or an unsafe id is refused. In particular a `SkinSummary` from `msime_client_skin_catalog`, whose keys are camelCase (`showSelectedBar`, `minWidthDip`, `themes`), is not an entry and is refused rather than read with its selection bar and declared modes silently lost; hosts that scan the skin root pass `skins_directory` instead.
     pub fn from_host_catalog_entry(entry: serde_json::Value) -> Result<Self, String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -122,6 +125,18 @@ impl ThemePackage {
             _decoration_align: serde::de::IgnoredAny,
             #[serde(default, rename = "corner_radius_dip")]
             _corner_radius_dip: serde::de::IgnoredAny,
+            #[serde(default, rename = "item_corner_radius_dip")]
+            _item_corner_radius_dip: serde::de::IgnoredAny,
+            #[serde(default, rename = "background_image")]
+            _background_image: serde::de::IgnoredAny,
+            #[serde(default, rename = "background_fit")]
+            _background_fit: serde::de::IgnoredAny,
+            #[serde(default, rename = "background_opacity")]
+            _background_opacity: serde::de::IgnoredAny,
+            #[serde(default, rename = "toolbar")]
+            _toolbar: serde::de::IgnoredAny,
+            #[serde(default, rename = "resolvedLayout")]
+            resolved_layout: Option<ResolvedSkinLayout>,
         }
         #[derive(Default, Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -171,6 +186,7 @@ impl ThemePackage {
             layouts: entry.layouts,
             light: entry.candidate.light.map(Into::into),
             dark: entry.candidate.dark.map(Into::into),
+            resolved_layout: entry.resolved_layout,
         })
     }
 }
@@ -182,6 +198,31 @@ pub struct CandidateDetails {
     pub preedit_caret: Option<String>,
     pub selected_translation: Option<String>,
     pub selected_bar: Option<String>,
+    /// 显式释义色与分段色；不把 `secondary` 的序号默认色误当成皮肤声明的释义色。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_pos: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_separator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_translation_pos: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_translation_separator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preedit_background: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preedit_divider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_arrow_divider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu_surface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu_border: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu_hover: Option<String>,
 }
 
 /// The colours a host draws for the selected theme.
@@ -199,6 +240,9 @@ pub struct ResolvedTheme {
     pub keyboard: Option<KeyboardThemePalette>,
     /// The external package drawn on this surface: the custom theme names it, it was found, and its manifest declares both `layout` and the mode drawn. Hosts draw the package's decoration and minimum width only when this is set.
     pub candidate_skin: Option<String>,
+    /// 当前候选排列对应的 Windows 兼容版式；旧包和非 Windows 基底保持为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_layout: Option<ResolvedSkinLayout>,
 }
 
 /// 以 `base` 为底的皮肤包属于哪种明暗：固定明暗的内置主题给出它自己的明暗，`system` 为 `None`，两种模式都可以画。
@@ -231,6 +275,7 @@ pub fn resolve(
             keyboard: Some(builtin.keyboard()),
             candidate_skin: None,
             candidate_details: None,
+            candidate_layout: None,
         };
     }
     // `native` 与 `system` 一样不带调色板，两者的区别只在宿主怎么画：`id` 原样带回，宿主据此分辨。
@@ -243,6 +288,7 @@ pub fn resolve(
             keyboard: None,
             candidate_skin: None,
             candidate_details: None,
+            candidate_layout: None,
         };
     }
     let package = package
@@ -288,6 +334,7 @@ pub fn resolve(
         (Some(text), None) => Some(with_alpha(text, PICKED_NUMBER_ALPHA)),
         _ => None,
     };
+    let picked_preedit_text = pickers.text.clone();
     explicit.apply(pickers);
     if picked_number.is_some() {
         explicit.number = picked_number;
@@ -298,19 +345,45 @@ pub fn resolve(
     let number = explicit.number.or(base_palette.number);
     let accent = explicit.accent.or(base_palette.accent);
     let candidate_details = drawn.and_then(|(_, palette)| {
-        let details = CandidateDetails {
-            preedit_text: color(&palette.preedit_text),
-            preedit_caret: color(&palette.preedit_caret),
-            selected_translation: color(&palette.selected_translation).map(|authored| {
+        let selected_detail = |value: &Option<String>| {
+            color(value).map(|authored| {
                 picked_selected_text
                     .as_deref()
                     .map(|text| with_alpha(text, PICKED_NUMBER_ALPHA))
                     .unwrap_or(authored)
-            }),
+            })
+        };
+        let selected_translation = selected_detail(&palette.selected_translation);
+        let details = CandidateDetails {
+            preedit_text: picked_preedit_text
+                .clone()
+                .or_else(|| color(&palette.preedit_text)),
+            preedit_caret: color(&palette.preedit_caret),
+            translation: color(&palette.translation),
+            translation_pos: color(&palette.translation_pos),
+            translation_separator: color(&palette.translation_separator),
+            selected_translation_pos: selected_detail(&palette.selected_translation_pos)
+                .or_else(|| selected_translation.clone()),
+            selected_translation_separator: selected_detail(
+                &palette.selected_translation_separator,
+            )
+            .or_else(|| selected_translation.clone()),
+            selected_translation,
             selected_bar: color(&palette.selected_bar),
+            preedit_background: color(&palette.preedit_background),
+            preedit_divider: color(&palette.preedit_divider),
+            page_arrow_divider: color(&palette.page_arrow_divider),
+            menu_surface: palette
+                .menu
+                .as_ref()
+                .and_then(|menu| color(&menu.background)),
+            menu_border: palette.menu.as_ref().and_then(|menu| color(&menu.border)),
+            menu_text: palette.menu.as_ref().and_then(|menu| color(&menu.text)),
+            menu_hover: palette.menu.as_ref().and_then(|menu| color(&menu.hover)),
         };
         (details != CandidateDetails::default()).then_some(details)
     });
+    let candidate_layout = drawn.and_then(|(package, _)| package.resolved_layout.clone());
     let candidate = CandidateThemePalette {
         surface: explicit.surface.or(base_palette.surface),
         border: explicit.border.or(base_palette.border),
@@ -352,6 +425,7 @@ pub fn resolve(
             .or_else(|| base.map(BuiltinTheme::keyboard)),
         candidate_skin: drawn.map(|(package, _)| package.id.clone()),
         candidate_details,
+        candidate_layout,
     }
 }
 

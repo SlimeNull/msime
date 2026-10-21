@@ -28,13 +28,46 @@ Json package(const char *id) {
 } // namespace
 
 int main() {
+  // 共享层合并后的排列表优先；原始表仍是编辑器看到的声明，不能重新覆盖解析结果。
+  {
+    auto skin = package("factory");
+    skin["geometry"] = {{"padding", length(19)}, {"itemGap", length(13)}};
+    skin["resolvedLayout"] = {
+        {"cornerRadiusDip", 0}, {"borderWidthDip", 0}, {"itemCornerRadiusDip", 4},
+        {"shadow", "none"}, {"pageArrows", true}, {"fitContent", false},
+        {"expandPanel", false}, {"expandRows", 4},
+        {"geometry", {{"padding", length(5)}}},
+        {"horizontal", {{"padding", length(5)}, {"itemGap", length(0.15, true)},
+                        {"itemMinWidth", length(3.5, true)}}},
+        {"vertical", {{"padding", length(5)}, {"itemGap", length(13)}}}};
+    skin["backdrop"] = "mica";
+    skin["borderImage"] = Json::object();
+    const Json catalog{{"packages", Json::array({skin})}};
+    const auto layout = candidate_skin_layout(catalog, "factory");
+    const auto horizontal = candidate_skin_metrics(layout, true, 24);
+    const auto vertical = candidate_skin_metrics(layout, false, 24);
+    require(horizontal.padding == 5 && horizontal.item_gap == 4 && horizontal.item_min_width == 84);
+    require(vertical.padding == 5 && vertical.item_gap == 13 && !vertical.item_min_width);
+    require(layout.item_corner_radius == 4 && layout.border_width == 0);
+    require(layout.shadow == CandidateSkinShadow::none && layout.page_arrows == true);
+    require(layout.backdrop == CandidateSkinBackdrop::mica && layout.panel_image);
+    require(candidate_skin_corner_radius(catalog, "factory") == 0);
+    // 带着共享层合并好的版式：最小宽度和 macOS 一样用 160 DIP。
+    require(layout.shared && horizontal.shared_layout && vertical.shared_layout);
+    // 旧 catalog 与损坏的可选扩展仍使用既有声明路径。
+    skin["resolvedLayout"] = nullptr;
+    const auto legacy = candidate_skin_layout(Json{{"packages", Json::array({skin})}}, "factory");
+    require(candidate_skin_metrics(legacy, true, 24).padding == 19);
+    require(!legacy.shared && !candidate_skin_metrics(legacy, true, 24).shared_layout);
+  }
   // 一个键都没写的包解析出空的版式，候选窗用宿主自己的值。
   {
     const Json catalog{{"packages", Json::array({package("plain")})}};
     const auto layout = candidate_skin_layout(catalog, "plain");
     require(!layout.border_width && !layout.item_corner_radius && !layout.shadow &&
             layout.backdrop == CandidateSkinBackdrop::none && !layout.page_arrows &&
-            !layout.fit_content && !layout.geometry.padding && !layout.horizontal.padding);
+            !layout.fit_content && !layout.expand_panel && !layout.expand_rows &&
+            !layout.geometry.padding && !layout.horizontal.padding);
     const auto metrics = candidate_skin_metrics(layout, true, 16.0);
     require(metrics.horizontal && !metrics.padding && !metrics.item_gap &&
             !metrics.number_scale && !metrics.selected_bar_height && !metrics.page_arrows &&
@@ -141,11 +174,20 @@ int main() {
                                {"preeditMarginDip", Json{{"top", 1.0}, {"right", 2.0}}},
                                {"itemExtraHeight", 3.0}};
     hostile["vertical"] = 7;
+    hostile["expandPanel"] = "yes";
+    hostile["expandRows"] = 4.5;
     const auto parsed =
         candidate_skin_layout(Json{{"packages", Json::array({hostile})}}, "hostile");
     require(!parsed.border_width && !parsed.item_corner_radius && !parsed.shadow &&
             parsed.backdrop == CandidateSkinBackdrop::none && !parsed.page_arrows &&
-            !parsed.fit_content);
+            !parsed.fit_content && !parsed.expand_panel && !parsed.expand_rows);
+    // expand_rows 只收 2-8 的整数。
+    for (const double rows : {1.0, 9.0, -2.0}) {
+      auto out_of_range = package("rows");
+      out_of_range["expandRows"] = rows;
+      require(!candidate_skin_layout(Json{{"packages", Json::array({out_of_range})}}, "rows")
+                   .expand_rows);
+    }
     require(!parsed.geometry.padding && !parsed.geometry.item_gap &&
             !parsed.geometry.number_scale && !parsed.geometry.selected_bar_width &&
             !parsed.geometry.page_arrow_style && !parsed.geometry.preedit_margin &&
@@ -166,6 +208,24 @@ int main() {
   require(near(candidate_skin_surface_alpha(CandidateSkinBackdrop::none, 0.6f), 0.6));
   require(near(candidate_skin_surface_alpha(CandidateSkinBackdrop::acrylic, 0.6f), 1.0));
   require(near(candidate_skin_surface_alpha(CandidateSkinBackdrop::mica, 0.15f), 1.0));
+
+  // 卷轴展开：expandPanel 与 expandRows 读进来；只在横排生效，打开时 page_arrows 被忽略，expand_rows 没写时是 4。
+  {
+    auto scroll = package("wechat-scroll-like");
+    scroll["expandPanel"] = true;
+    scroll["expandRows"] = 6;
+    scroll["pageArrows"] = true;
+    const auto scroll_layout =
+        candidate_skin_layout(Json{{"packages", Json::array({scroll})}}, "wechat-scroll-like");
+    require(scroll_layout.expand_panel == true && scroll_layout.expand_rows == 6 && scroll_layout.page_arrows == true);
+    const auto horizontal = candidate_skin_metrics(scroll_layout, true, 16.0);
+    require(horizontal.expand_panel && horizontal.expand_rows == 6 && !horizontal.page_arrows);
+    const auto vertical = candidate_skin_metrics(scroll_layout, false, 16.0);
+    require(!vertical.expand_panel && vertical.page_arrows);
+    auto defaults = scroll_layout;
+    defaults.expand_rows.reset();
+    require(candidate_skin_metrics(defaults, true, 16.0).expand_rows == 4);
+  }
 
   // 资源一起带上版式。
   {

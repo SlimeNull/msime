@@ -110,7 +110,7 @@ test("a touch host that can name the editor's application gets the mode scope co
   await screen.findByLabelText("中英文状态");
   cleanup();
   mount({ host: capabilities({ platform: "android", ime_mode_scope: false }) });
-  await screen.findByLabelText("输入模式");
+  await settingsFormReady();
   expect(screen.queryByLabelText("中英文状态")).toBeNull();
 });
 
@@ -346,6 +346,56 @@ test.each(["windows", "macos", "harmony"] as const)(
   },
 );
 
+test("the Linux toolbar page previews the floating bar its host draws and names the menu fallback", async () => {
+  // Linux 宿主在 X11 上画悬浮工具栏并报告 floating_toolbar_appearance：页面与 macOS 一样有预览、尺寸和颜色，预览下另说明画不出来时退回「工具栏」子菜单。
+  mount({
+    host: capabilities({
+      platform: "linux",
+      floating_toolbar: true,
+      floating_toolbar_appearance: true,
+      floating_toolbar_components: true,
+    }),
+  });
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("button", { name: /^(悬浮工具栏|快捷工具)$/ }));
+  const toolbar = screen.getByRole("group", { name: "悬浮工具栏" });
+  expect(toolbar.querySelector("[data-toolbar-preview]")).toBeTruthy();
+  expect(screen.getByLabelText("在桌面显示悬浮工具栏")).toBeTruthy();
+  expect(screen.getByLabelText("工具栏大小")).toBeTruthy();
+  expect(
+    screen.getByText(/^Linux 在 X11 上显示悬浮工具栏，Wayland 桌面经 Xwayland 显示/),
+  ).toBeTruthy();
+  expect(screen.queryByText(/Linux 不显示悬浮工具栏窗口/)).toBeNull();
+  expect(screen.queryByText(/GNOME/)).toBeNull();
+  const groups = [...toolbar.querySelectorAll("[data-group-title]")];
+  expect(groups.map((title) => title.textContent)).toEqual(["显示", "按钮", "尺寸"]);
+});
+
+test("the Linux toolbar page under GNOME Shell does not point at a menu fallback that is not there", async () => {
+  // GNOME Shell 的 IBus 输入源菜单没有「工具栏」子菜单：画悬浮条的宿主在那里不能说退回子菜单，开关和按钮照样作用于悬浮条。
+  mount({
+    host: capabilities({
+      platform: "linux",
+      floating_toolbar: true,
+      floating_toolbar_appearance: true,
+      floating_toolbar_components: true,
+      candidate_panel_limit: "gnome_shell",
+    }),
+  });
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("button", { name: /^(悬浮工具栏|快捷工具)$/ }));
+  const toolbar = screen.getByRole("group", { name: "悬浮工具栏" });
+  expect(toolbar.querySelector("[data-toolbar-preview]")).toBeTruthy();
+  expect(
+    screen.getByText(/当前是 GNOME 桌面，IBus 的输入源菜单里没有「工具栏」子菜单/),
+  ).toBeTruthy();
+  expect(screen.queryByText(/以输入法菜单里的「工具栏」子菜单呈现/)).toBeNull();
+  expect(screen.queryByText(/Linux 不显示悬浮工具栏窗口/)).toBeNull();
+  expect(screen.getByText("快速访问输入法状态与常用功能")).toBeTruthy();
+  expect(screen.getByText("勾选要显示在悬浮工具栏上的按钮")).toBeTruthy();
+  expect(screen.queryByText(/当前 GNOME 桌面不生效|这个开关在这里不生效/)).toBeNull();
+});
+
 test("the floating-toolbar settings page is hidden when the host has no toolbar", async () => {
   mount({
     host: capabilities({
@@ -432,22 +482,38 @@ test("a Linux host that reads the border and number colours says which panel dra
   expect(captions[1].parentElement?.textContent).toContain("候选强调色");
 });
 
+// Fcitx5 在 X11 上用原生画布画候选窗时（宿主报告 `renderer: native_canvas`，`apply_linux_native_canvas` 打开选中外观），编号、强调色和固定候选都由它自己画，「仅对 IBus 生效」的说明不再成立。
+test("a Linux host drawing with the native canvas does not say the accent reaches IBus only", async () => {
+  mount({
+    host: capabilities({
+      platform: "linux",
+      candidate_row_colors: true,
+      candidate_selection_appearance: true,
+      candidate_number_color: true,
+    }),
+  });
+  await settingsFormReady();
+  expect(screen.getByLabelText("候选强调色")).toBeTruthy();
+  expect(screen.getByLabelText("候选编号颜色")).toBeTruthy();
+  expect(screen.queryByText(/此项仅对 IBus 生效/)).toBeNull();
+});
+
 test.each([
   [
     "gnome_shell",
-    "GNOME Shell 自己绘制 IBus 候选窗口并跟随 Shell 主题，这里的候选字体、颜色和皮肤在当前桌面不会生效。",
+    "GNOME Shell 自己绘制 IBus 候选窗口并跟随 Shell 主题，这里的候选字体、颜色、皮肤、整体大小、圆角、内边距、不透明度和水杉 logo 在当前桌面都不会生效。",
   ],
   [
     "fcitx_theme",
-    "Fcitx5 正在使用你在 Fcitx5 配置中选择的经典界面主题，这里的候选颜色和皮肤不会覆盖它；字体仍然生效。把它改回 Fcitx5 默认主题，或在这里换一个全局主题，即可让候选颜色与皮肤生效。",
+    "Fcitx5 正在使用你在 Fcitx5 配置中选择的经典界面主题，或者设置了 MSIME_FCITX5_THEME_AUTOGENERATE=0 停止更新水杉主题，这里的候选颜色和皮肤不会写进候选窗，圆角、内边距、不透明度和水杉 logo 也不会生效，整体大小只缩放字号；字体仍然生效。把主题改回 Fcitx5 默认主题、在这里换一个全局主题，或去掉这个环境变量后重启 Fcitx5，即可让这些设置生效。",
   ],
   [
     "kimpanel",
-    "Fcitx5 的候选窗口由桌面的 Kimpanel 绘制，使用桌面自己的字体和主题，这里的候选字体、颜色和皮肤不会生效。",
+    "Fcitx5 的候选窗口由桌面的 Kimpanel 绘制，使用桌面自己的字体和主题，这里的候选字体、颜色、皮肤、整体大小、圆角、内边距、不透明度和水杉 logo 都不会生效。",
   ],
   [
     "ibus_panel",
-    "IBus 的候选窗口由桌面的输入法面板绘制，只接收候选字体和颜色：这里的圆角和皮肤的装饰图在 IBus 下不会生效。",
+    "IBus 的候选窗口由桌面的输入法面板绘制，只接收候选字体和颜色：整体大小只缩放字号，这里的圆角、内边距、不透明度、水杉 logo 和皮肤的装饰图在 IBus 下不会生效。",
   ],
 ] as const)(
   "a Linux panel that ignores the appearance settings (%s) is named on the appearance and skin pages",
@@ -597,7 +663,7 @@ test("a host with one commit path is not offered a choice between three", async 
       }}
     />,
   );
-  await screen.findByText("录音行为");
+  await settingsFormReady();
   expect(screen.queryByLabelText("结果提交策略")).toBeNull();
   cleanup();
   render(
@@ -610,7 +676,8 @@ test("a host with one commit path is not offered a choice between three", async 
       }}
     />,
   );
-  expect(await screen.findByLabelText("结果提交策略")).toBeTruthy();
+  await settingsFormReady();
+  expect(screen.getByRole("combobox", { name: "结果提交策略" })).toBeTruthy();
 });
 
 test("the shuangpin preedit choice reaches every host that draws the composition", async () => {
@@ -750,7 +817,7 @@ test("a host that can enumerate microphones gets the picker, whatever it is call
           load: async () => initial,
           save: vi.fn(),
           listVoiceCaptureDevices: read,
-          // 录音设备收在「服务配置」子视图里，这里测的是能力。HarmonyOS 只有一种录音方式（`voice_capture_backends` 为 false），只给一个「麦克风」下拉。
+          // 录音设备位于「录音行为」标签，这里测的是能力。HarmonyOS 只有一种录音方式（`voice_capture_backends` 为 false），只给一个「麦克风」下拉。
           host: capabilities({
             platform: "harmony",
             mobile_settings: false,
@@ -761,12 +828,15 @@ test("a host that can enumerate microphones gets the picker, whatever it is call
       />,
     );
   voice(true);
-  expect(await screen.findByLabelText("麦克风")).toBeTruthy();
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("tab", { name: "录音行为" }));
+  expect(screen.getByRole("combobox", { name: "麦克风" })).toBeTruthy();
   expect(screen.queryByLabelText("可用录音设备")).toBeNull();
   cleanup();
   voice(false);
-  await screen.findByText("录音行为");
-  expect(screen.queryByLabelText("麦克风")).toBeNull();
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("tab", { name: "录音行为" }));
+  expect(screen.queryByRole("combobox", { name: "麦克风" })).toBeNull();
 });
 
 test("the mode badge switch follows the capability rather than the macOS platform name", async () => {
@@ -809,8 +879,8 @@ test("a host whose skin folder is unreachable is offered an import, not a folder
     openSkinDirectory: async () => undefined,
   });
   await settingsFormReady();
-  // 2in1 是桌面形态，本地皮肤操作在「主题外观」的「本地皮肤」标签中。
-  fireEvent.click(screen.getByRole("button", { name: "主题外观" }));
+  // 2in1 是桌面形态，本地皮肤操作在「主题」的「本地皮肤」标签中。
+  fireEvent.click(screen.getByRole("button", { name: "主题" }));
   selectSettingsTab("本地皮肤");
   expect(screen.getByRole("button", { name: "导入皮肤" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "打开目录" })).toBeNull();
@@ -823,7 +893,7 @@ test("a desktop host still opens its skin folder", async () => {
     openSkinDirectory: async () => undefined,
   });
   await settingsFormReady();
-  fireEvent.click(screen.getByRole("button", { name: "主题外观" }));
+  fireEvent.click(screen.getByRole("button", { name: "主题" }));
   selectSettingsTab("本地皮肤");
   expect(screen.getByRole("button", { name: "打开目录" })).toBeTruthy();
 });

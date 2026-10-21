@@ -35,7 +35,7 @@ motion_period_ms = 3000   # 1200–8000，缺省 3000
 
 - 共享加载器 `crates/client-services/src/skin/catalog.rs` 的 `read_decoration_motion` 解析这两个键。版本 1 写了就以 `decoration motion requires schema_version 2` 拒绝，与 `[animation]` 只在 v2 里可写一致。没有装饰的包写 `motion` 也拒绝。
 - `SkinSummary` 新增 `decoration_motion`、`decoration_motion_period_ms` 和 `decoration_frames`，序列化为 `decorationMotion`、`decorationMotionPeriodMs`、`decorationFrames`。帧数在没有装饰图时为 0，静态图为 1，APNG 为它 `acTL` 声明的帧数。
-- 帧动画不加新键：`image` 指向一张 APNG 就是帧动画。APNG 仍是 `.png`，旧客户端、服务端和不播放帧的宿主都只看到默认图（第一帧）。
+- 帧动画不加新键：`image` 指向一张 APNG 就是帧动画。APNG 可以沿用 `.png` 后缀，让不播放帧的宿主读取默认图；服务端逐帧校验并保留动画。新的 `.apng` 后缀和 GIF/WebP 社区传输见[按服务端能力上传](2026-10-19-community-canvas-resources.md)。
 - 新规则也写进了共享用例表 `catalog/client_dialect.json`，msime-cloud 和 msime-windows 靠各自的同步脚本跟上。
 
 ### 校验与上限
@@ -133,7 +133,7 @@ MCP 的 `create_candidate_skin` 说明和 `make_skin` prompt 写明 `motion`、`
 - APNG 的每一帧都计入像素合计，同样尺寸的图，帧数越多，背景图和预览能用的像素越少。
 - 社区服务端发布时会重新编码图片（`MAX_PACKAGE_FILE_BYTES` 的注释），而 Go 的 `image/png` 解码时跳过 `acTL`、`fcTL`、`fdAT` 这些辅助块。按推断，重新编码后只剩默认图，所以从社区下载的皮肤目前没有帧动画，本地安装和 MCP 创建的有。服务端的代码不在本仓库，这一点没有核实。
 - 网页引擎和共享 React 设置页的 APNG 由浏览器播放，不理减弱动态效果；它们也不播待机动效。
-- 新增或调整一种待机动效，要同时改 `catalog.rs` 的枚举和用例表、`SkinManifestBridge.mm` 的映射、`CandidateMotion.mm` 的 `DecorationMotionAnimation`、MCP 文案和本笔记。
+- 新增或调整一种待机动效，要同时改 `catalog.rs` 的枚举和用例表、`SkinManifestBridge.mm` 的映射、`CandidateMotion.mm` 的 `DecorationMotionAnimation`、`shared/candidate/CandidateMotionRules.h` 的 `DecorationMotionAt`（Linux 原生画布逐帧采样用它，幅度常量两边共用）、MCP 文案和本笔记。
 
 ### 后续
 
@@ -147,7 +147,7 @@ MCP 的 `create_candidate_skin` 说明和 `make_skin` prompt 写明 `motion`、`
 
 服务端与其他仓库：
 
-- msime-cloud 发布时保留 APNG 的动画块，按本笔记的帧数和逐帧像素规则校验。
+- msime-cloud 已有 APNG 保留与逐帧校验路径；GIF/WebP 和 `.apng` 社区资源扩展见[按服务端能力上传](2026-10-19-community-canvas-resources.md)。
 - msime-cloud 和 msime-windows 用同步脚本刷新 `client_dialect.json` 副本，接受新键。
 
 ### 验证

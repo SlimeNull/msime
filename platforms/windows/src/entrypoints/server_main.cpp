@@ -3,6 +3,7 @@
 #include "AuxListener.h"
 #include "VoiceTheme.h"
 #include "CandidateAppearance.h"
+#include "CandidateCanvasImages.h"
 #include "CandidateSkin.h"
 #include "CandidateThemeSettings.h"
 #include "SkinResourceRevision.h"
@@ -1031,6 +1032,9 @@ int wmain(int argc, wchar_t **argv) {
         ReadAppInputModeRules(prepared.at("value").at("preferences"));
     auto input_mode_hud_enabled = std::make_shared<std::atomic<bool>>(
         prepared.at("value").at("preferences").value("input_mode_hud", true));
+    // 徽标画不画 logo 单独跟着 `show_app_logo` 走，不借工具栏那份设置：工具栏尺寸越界时那份设置不发布，logo 不该跟着丢。
+    auto input_mode_hud_logo = std::make_shared<std::atomic<bool>>(
+        hud_show_app_logo(prepared.at("value").at("preferences")));
     // "follow" 取全局的 `theme`，它的 "system" 再交给 Windows 的应用模式。
     const auto followed_surface_theme = [&] {
       const auto &stored = prepared.at("value").at("preferences");
@@ -1080,7 +1084,7 @@ int wmain(int argc, wchar_t **argv) {
     auto candidate_style = std::make_shared<CandidateWindowStyleMailbox>();
     auto toolbar_settings = std::make_shared<FloatingToolbarMailbox>();
     auto candidate_theme = std::make_shared<CandidateThemeMailbox>();
-    // logo 开关和释义预留行数从启动时的偏好取，第一次发布之前候选卡片就按它们排版。预留行数还要看装了哪些离线释义词典，启动时查一次。
+    // logo 开关、页码开关和释义预留行数从启动时的偏好取，第一次发布之前候选卡片就按它们排版。预留行数还要看装了哪些离线释义词典，启动时查一次。
     const auto offline_gloss_languages = installed_offline_gloss_languages(config.resources);
     const auto stored_candidate_layout =
         candidate_layout_settings(prepared.at("value").at("preferences"), offline_gloss_languages)
@@ -1089,7 +1093,8 @@ int wmain(int argc, wchar_t **argv) {
         CandidateLayoutSettings{
             config.horizontal_candidates, config.candidate_show_preedit, true,
             stored_candidate_layout.show_app_logo,
-            stored_candidate_layout.reserved_gloss_lines}
+            stored_candidate_layout.reserved_gloss_lines,
+            stored_candidate_layout.show_page_number}
             .encode());
     // Keep the native listener on the same file used by the shared desktop
     // shell; this is the cross-process handoff for the clipboard panel.
@@ -1147,7 +1152,7 @@ int wmain(int argc, wchar_t **argv) {
         [&, voice_config, voice_config_mutex, voice_host_options, traditional_output,
          toolbar_enabled, follow_cursor, shuangpin_keymap_enabled, typing_feedback, candidate_mouse_wheel, voice_theme, candidate_fonts, candidate_style,
          toolbar_theme, menu_theme, mode_scope_global, app_mode_rules,
-         input_mode_hud_enabled, tsf_config, candidate_layout,
+         input_mode_hud_enabled, input_mode_hud_logo, tsf_config, candidate_layout,
          tsf_config_mutex, tray_preferences, tray_preferences_mutex,
          tsf_config_revision, candidate_theme, toolbar_settings,
          language_dictionaries](const PreferenceSnapshot &snapshot) {
@@ -1183,6 +1188,7 @@ int wmain(int argc, wchar_t **argv) {
           }
           input_mode_hud_enabled->store(preferences.value("input_mode_hud", true),
                                         std::memory_order_release);
+          input_mode_hud_logo->store(hud_show_app_logo(preferences), std::memory_order_release);
           // 工具栏、托盘菜单和语音浮层跟随颜色模式，只看全局的 `theme`（见上面三个原子量的说明）。语音浮层在后面才建，所以经原子量交给循环去套用。
           const auto surface_mode =
               surface_theme_mode("follow", preferences.value("theme", std::string("dark")));
@@ -1372,7 +1378,8 @@ int wmain(int argc, wchar_t **argv) {
       if (click.action == CandidateAction::Select) {
         if (server.request_selection(click.lease, click.session,
                                      click.generation, click.index,
-                                     click.translation_page) ==
+                                     click.translation_page,
+                                     click.expanded_text) ==
             SelectionRequestResult::Failed)
           throw std::runtime_error("Candidate selection failed");
         return;
@@ -1466,6 +1473,13 @@ int wmain(int argc, wchar_t **argv) {
           server.candidate_rendered(value.lease, value.render_serial);
         },
         candidate_mouse_wheel->load(std::memory_order_acquire));
+    // 皮肤的卷轴展开：点开「∨」后由 Server 在输入队列上取这一代的完整候选列表，随候选快照交回候选窗。
+    candidates.set_expansion_handler([&](const FocusLease &lease, bool open) {
+      server.set_candidate_expansion(lease, open);
+    });
+    // 退场途中焦点换走时立即收起，不让旧候选在新的前台上淡出。
+    candidates.set_lease_check(
+        [&](const FocusLease &lease) { return server.candidate_lease_current(lease); });
     if (typing_overlay)
       candidates.set_typing_effect_presenter([&typing_overlay](const TypingEffectPresentation &presentation) {
         return typing_overlay->present(presentation);
@@ -1484,10 +1498,10 @@ int wmain(int argc, wchar_t **argv) {
                     .first;
       return found->second;
     };
-    auto resolved_theme = [&](bool dark,
-                              bool horizontal) -> const CandidateThemeResolution & {
-      const auto request = candidate_theme_request(
-          current_candidate_theme, dark, horizontal, config.skin_directory);
+    auto resolved_theme = [&](bool dark, bool horizontal,
+                              bool canvas_panel_drawn = false) -> const CandidateThemeResolution & {
+      const auto request = candidate_theme_request(current_candidate_theme, dark, horizontal,
+                                                   config.skin_directory, canvas_panel_drawn);
       auto key = request.dump();
       auto found = resolved_themes.find(key);
       if (found == resolved_themes.end())
@@ -1495,20 +1509,40 @@ int wmain(int argc, wchar_t **argv) {
                     .first;
       return found->second;
     };
-    // The card's palette for a resolved theme: the shared resolution, with the package's extra slots (candidate_text, preedit, selected row, bar and menu colours) the resolution does not carry, under the user's pickers. A canvas package needs nothing more here: the shared catalog already gives it the opaque canvas look, replacing the colours picked for a nine-slice panel this host does not draw, as on every other host.
+    // The card's palette for a resolved theme: the shared resolution, with the package's extra slots (candidate_text, preedit, selected row, bar and menu colours) the resolution does not carry, under the user's pickers. 不画 canvas 面板的界面（工具条、菜单、语音浮层、双拼键位图，以及面板图解不出来的候选卡片）拿到的是共享 catalog 给 canvas 包的不透明 `canvas` 外观可读配色，与其他宿主相同。
     auto card_palette = [&](const CandidateThemeResolution &theme, bool dark) {
       return apply_candidate_skin_extra_slots(
           candidate_theme_palette(theme, dark),
           package_assets(theme.candidate_skin).candidate_colors,
           candidate_theme_pickers(current_candidate_theme), theme.dark.value_or(dark));
     };
-    // Canvas packages load here, but their border_image, insets and free decorations are not drawn; say so once per package.
+    // 候选卡片在这一种明暗下要画的 canvas 画布：按卡片实际的明暗选面板图，面板和挂件都用 WIC 确认解得出来。不是 canvas 包时为空。
+    auto card_canvas = [&](const CandidateThemeResolution &theme, bool dark) {
+      return candidate_canvas_drawable(package_assets(theme.candidate_skin).canvas_skin,
+                                       !theme.dark.value_or(dark),
+                                       candidate_canvas_image_decodes);
+    };
+    // 候选卡片自己的配色：面板画得出来时向共享层要 `canvas_panel_drawn` 的解析，取包为贴图挑的原配色（取色器照旧优先）；否则就是 card_palette。
+    auto card_canvas_palette = [&](const CandidateThemeResolution &theme, bool dark, bool horizontal,
+                                   const msime::windows::CandidateSkinCanvas &canvas) {
+      return candidate_canvas_panel_drawn(canvas)
+                 ? card_palette(resolved_theme(dark, horizontal, true), dark)
+                 : card_palette(theme, dark);
+    };
+    // canvas 包的面板图或挂件解不出来（文件损坏、系统没有对应的解码器）时，每款包记一次。
     std::set<std::string> canvas_skins_noticed;
     auto notice_canvas_skin = [&](const std::string &id,
-                                  const msime::windows::CandidateSkinAssets &assets) {
-      if (assets.canvas && canvas_skins_noticed.insert(id).second)
+                                  const msime::windows::CandidateSkinAssets &assets,
+                                  const msime::windows::CandidateSkinCanvas &drawn) {
+      if (!assets.canvas_skin.active || !canvas_skins_noticed.insert(id).second)
+        return;
+      if (assets.canvas_skin.border && !candidate_canvas_panel_drawn(drawn))
         notice("Candidate skin " + id +
-               " is a canvas skin; this host does not draw its border_image, insets or free decorations yet, so the card uses the canvas look");
+               ": the canvas border_image does not decode, so the card uses the opaque canvas look");
+      if (const auto dropped =
+              assets.canvas_skin.decorations.size() - drawn.decorations.size())
+        notice("Candidate skin " + id + ": " + std::to_string(dropped) +
+               " canvas decoration image(s) do not decode and are not drawn");
     };
     bool candidate_theme_dirty = true;
     bool candidate_dark_applied = config.dark_theme;
@@ -1531,13 +1565,17 @@ int wmain(int argc, wchar_t **argv) {
     {
       const auto &theme =
           resolved_theme(config.dark_theme, config.horizontal_candidates);
-      auto palette = card_palette(theme, config.dark_theme);
+      const auto canvas = card_canvas(theme, config.dark_theme);
+      auto palette = card_canvas_palette(theme, config.dark_theme,
+                                         config.horizontal_candidates, canvas);
+      auto keymap_palette = card_palette(theme, config.dark_theme);
       const auto &assets = package_assets(theme.candidate_skin);
       if (config.candidate_selected_bar)
-        palette.show_selected_bar = *config.candidate_selected_bar;
+        palette.show_selected_bar = keymap_palette.show_selected_bar =
+            *config.candidate_selected_bar;
       candidates.set_palette(palette);
       if (keymap)
-        keymap->set_palette(palette);
+        keymap->set_palette(keymap_palette);
       // An external package may ask for a wider card than the font implies; the artwork is drawn against that width.
       candidates.set_skin_min_width(assets.min_width);
       candidates.set_skin_decoration(assets.decoration);
@@ -1546,7 +1584,8 @@ int wmain(int argc, wchar_t **argv) {
       candidates.set_skin_layout(assets.layout);
       candidates.set_skin_font_family(assets.font_family);
       candidates.set_skin_animation(assets.animation);
-      notice_canvas_skin(theme.candidate_skin, assets);
+      candidates.set_skin_canvas(canvas);
+      notice_canvas_skin(theme.candidate_skin, assets, canvas);
       candidate_skin_applied = theme.candidate_skin;
     }
     candidates.set_follow_cursor(follow_cursor->load(std::memory_order_acquire));
@@ -1570,14 +1609,17 @@ int wmain(int argc, wchar_t **argv) {
         toolbar_theme->load(std::memory_order_acquire), system_dark);
     uint64_t toolbar_theme_applied = candidate_theme_generation;
     toolbar.set_palette(toolbar_surface_palette(toolbar_dark_applied));
-    // 中英文切换提示，穿工具栏的配色、用工具栏的尺寸。建不出窗口时记一条诊断，Server 照常服务输入，和工具栏失败时一样。
+    {
+      const auto &theme = resolved_theme(toolbar_dark_applied, candidate_horizontal_applied);
+      const auto &assets = package_assets(theme.candidate_skin);
+      toolbar.set_image_skin(assets.toolbar_image, assets.toolbar_directory);
+    }
+    // 中英文切换提示，穿工具栏的配色，按 `show_app_logo` 画不画 logo；尺寸是自己的固定紧凑尺寸，不跟工具栏的字号和缩放。建不出窗口时记一条诊断，Server 照常服务输入，和工具栏失败时一样。
     std::optional<InputModeHudWindow> mode_hud;
     try {
       mode_hud.emplace();
       mode_hud->set_palette(toolbar_surface_palette(toolbar_dark_applied));
-      if (const auto settings =
-              floating_toolbar_settings(prepared.at("value").at("preferences")))
-        mode_hud->set_settings(*settings);
+      mode_hud->set_show_logo(input_mode_hud_logo->load(std::memory_order_acquire));
     } catch (const std::exception &) {
       mode_hud.reset();
       notice("Input mode HUD unavailable; continuing without it");
@@ -1692,6 +1734,7 @@ int wmain(int argc, wchar_t **argv) {
     menu_capabilities.voice_input = true;
     menu_capabilities.settings = settings_shell.has_value();
     menu_capabilities.cloud_clipboard = preview_shell.has_value();
+    menu_capabilities.cloud_dictionary = preview_shell.has_value();
     menu_capabilities.cantonese = language_dictionaries.cantonese;
     menu_capabilities.zhuyin = language_dictionaries.zhuyin;
     menu_capabilities.stroke = language_dictionaries.stroke;
@@ -1845,9 +1888,9 @@ int wmain(int argc, wchar_t **argv) {
           [&](const TrayMenuTheme &row) { return row.id == theme; });
       return listed && store_global_theme(config.state_root, theme);
     });
-    // 悬浮工具栏的两个弹出菜单，画法与托盘卡片相同。方案菜单只放「输入方案」那一组行，右键菜单是 macOS 设置按钮的实用菜单。
+    // 悬浮工具栏的两个弹出菜单，画法与托盘卡片相同。方案菜单只放「输入方案」那一组行，缺词典跑不起来的方案不列出，与 macOS 工具栏的方案菜单一样；右键菜单是 macOS 设置按钮的实用菜单。
     TrayMenuWindow scheme_menu(
-        [&] { return tray_menu_scheme_items(menu_capabilities, tray_state()); },
+        [&] { return tray_menu_scheme_items(menu_capabilities, tray_state(), true); },
         tray_command);
     TrayMenuWindow utility_menu(
         [&] { return toolbar_utility_menu_items(menu_capabilities); }, tray_command);
@@ -2168,12 +2211,17 @@ int wmain(int argc, wchar_t **argv) {
         if (candidate_theme_dirty || skin_resources_changed || dark != candidate_dark_applied ||
             candidate_horizontal != candidate_horizontal_applied) {
           const auto &theme = resolved_theme(dark, candidate_horizontal);
-          auto next_palette = card_palette(theme, dark);
+          // 面板图跟着明暗换（`light_source`），所以每次重新套用配色都重新选一次画布。
+          const auto canvas = card_canvas(theme, dark);
+          auto next_palette = card_canvas_palette(theme, dark, candidate_horizontal, canvas);
+          auto keymap_palette = card_palette(theme, dark);
           if (config.candidate_selected_bar)
-            next_palette.show_selected_bar = *config.candidate_selected_bar;
+            next_palette.show_selected_bar = keymap_palette.show_selected_bar =
+                *config.candidate_selected_bar;
           candidates.set_theme_palette(next_palette);
+          candidates.set_skin_canvas(canvas);
           if (keymap)
-            keymap->set_palette(next_palette);
+            keymap->set_palette(keymap_palette);
           if (skin_resources_changed || theme.candidate_skin != candidate_skin_applied) {
             const auto &assets = package_assets(theme.candidate_skin);
             candidates.invalidate_skin_images();
@@ -2184,7 +2232,7 @@ int wmain(int argc, wchar_t **argv) {
             candidates.set_skin_layout(assets.layout);
             candidates.set_skin_font_family(assets.font_family);
             candidates.set_skin_animation(assets.animation);
-            notice_canvas_skin(theme.candidate_skin, assets);
+            notice_canvas_skin(theme.candidate_skin, assets, canvas);
             candidate_skin_applied = theme.candidate_skin;
           }
           candidate_dark_applied = dark;
@@ -2236,11 +2284,10 @@ int wmain(int argc, wchar_t **argv) {
       }
       // The settings page may have published a new value since the last pass.
       toolbar_visible = toolbar_enabled->load(std::memory_order_acquire);
-      if (auto settings = toolbar_settings->take()) {
+      if (auto settings = toolbar_settings->take())
         toolbar.set_settings(*settings);
-        if (mode_hud)
-          mode_hud->set_settings(*settings);
-      }
+      if (mode_hud)
+        mode_hud->set_show_logo(input_mode_hud_logo->load(std::memory_order_acquire));
       if (const bool dark = !surface_theme_is_light(
               voice_theme->load(std::memory_order_acquire), system_dark);
           dark != voice_dark_applied || voice_theme_applied != candidate_theme_generation) {
@@ -2261,6 +2308,9 @@ int wmain(int argc, wchar_t **argv) {
         toolbar_dark_applied = dark;
         toolbar_theme_applied = candidate_theme_generation;
         toolbar.set_palette(toolbar_surface_palette(dark));
+        const auto &theme = resolved_theme(dark, candidate_horizontal_applied);
+        const auto &assets = package_assets(theme.candidate_skin);
+        toolbar.set_image_skin(assets.toolbar_image, assets.toolbar_directory);
         if (mode_hud)
           mode_hud->set_palette(toolbar_surface_palette(dark));
       }
@@ -2347,7 +2397,7 @@ int wmain(int argc, wchar_t **argv) {
       }
       candidates.set_mouse_wheel(
           candidate_mouse_wheel->load(std::memory_order_acquire));
-      // 语言按钮在 Caps Lock 开着时显示 'A'，日文模式显示 日，韩文模式显示 한，粤拼、注音、越南文、藏文、笔画分别显示 粤、注、越、藏、笔，引擎自己的英文模式显示带下划线的 "En"，所以它要跟随这些状态。Caps Lock 开着时显示 中 会让用户误判下一个字母键的作用。
+      // 语言按钮在 Caps Lock 开着时显示 'A'，日文模式显示 日，韩文模式显示 한，粤拼、注音、越南文、藏文、笔画分别显示 粤、注、越、ཀ、笔（任务栏语言栏图标的藏文仍是「藏」），引擎自己的英文模式显示不带下划线的 "En"，所以它要跟随这些状态。Caps Lock 开着时显示 中 会让用户误判下一个字母键的作用。
       {
         ToolbarLanguageState language;
         language.caps_lock = caps_lock.load(std::memory_order_acquire);

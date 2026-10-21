@@ -307,7 +307,7 @@ final class CandidateTranslationTests: XCTestCase {
     func cells(_ spans: [Int], _ columns: Int) -> [[Int]] {
       KeyboardCandidatePanelView.place(spans: spans, columns: columns).map { [$0.row, $0.column, $0.span] }
     }
-    // The cell before a wrap stretches to the end of its row; the last row keeps its spans.
+    // 换行前的单元格拉伸到行尾，最后一行保留自身跨度。
     XCTAssertEqual(cells([1, 1, 2, 2, 2, 1], 5),
                    [[0, 0, 1], [0, 1, 1], [0, 2, 3], [1, 0, 2], [1, 2, 2], [1, 4, 1]])
     XCTAssertEqual(cells([1, 1], 4), [[0, 0, 1], [0, 1, 1]])
@@ -322,11 +322,13 @@ final class CandidateTranslationTests: XCTestCase {
     let chips = try (1...5).map { index in
       try XCTUnwrap(descendants(panel).first { $0.accessibilityIdentifier == "panelCandidate-\(index)" })
     }
-    let edge = try XCTUnwrap(chips[0].superview).bounds.width - KeyboardCandidatePanelView.gridPadding
-    XCTAssertEqual(chips[3].frame.minY, chips[0].frame.minY, accuracy: 0.5)
-    XCTAssertGreaterThan(chips[4].frame.minY, chips[0].frame.minY)
-    XCTAssertEqual(chips[3].frame.maxX, edge, accuracy: 0.5, "the row before the sentence ends flush")
-    XCTAssertLessThan(chips[4].frame.maxX, edge - 1, "the last row is not stretched")
+    let collection = try XCTUnwrap(descendants(panel).compactMap { $0 as? UICollectionView }.first)
+    let frames = chips.map { $0.convert($0.bounds, to: collection) }
+    let edge = collection.bounds.width - KeyboardCandidatePanelView.gridPadding
+    XCTAssertEqual(frames[3].minY, frames[0].minY, accuracy: 0.5)
+    XCTAssertGreaterThan(frames[4].minY, frames[0].minY)
+    XCTAssertEqual(frames[3].maxX, edge, accuracy: 0.5, "换行前的单元格应到达行尾")
+    XCTAssertLessThan(frames[4].maxX, edge - 1, "最后一行不拉伸")
   }
 
   /// A row is reserved only for a gloss that can actually arrive.
@@ -382,6 +384,36 @@ final class CandidateTranslationTests: XCTestCase {
                    "an installed Japanese dictionary fills that row without any network")
     XCTAssertEqual(KeyboardViewController.configuredGlossLines(fullAccess: false, onlineRoute: false, offline: ["FR"]), 0,
                    "a dictionary for a language nobody picked reserves nothing")
+  }
+
+  func testOfflineGlossSkipsSystemPermissionReads() throws {
+    let previousOnline = CandidateTranslationPreference.onlineEnabled
+    defer { CandidateTranslationPreference.onlineEnabled = previousOnline }
+    CandidateTranslationPreference.onlineEnabled = true
+    let english = try XCTUnwrap(CandidateTranslationPreference.languages.first { $0.code == "EN" })
+    let japanese = try XCTUnwrap(CandidateTranslationPreference.languages.first { $0.code == "JA" })
+    var reads = 0
+    func permission(_ allowed: Bool = true) -> Bool { reads += 1; return allowed }
+    for _ in 0..<9 {
+      XCTAssertTrue(KeyboardViewController.canFillGloss(
+        english, fullAccess: permission(), onlineRoute: true))
+      XCTAssertTrue(KeyboardViewController.canFillGloss(
+        japanese, fullAccess: permission(), onlineRoute: true, offline: ["JA"]))
+    }
+    XCTAssertEqual(reads, 0, "离线候选不应逐词查询系统权限")
+    XCTAssertFalse(KeyboardViewController.canFillGloss(
+      japanese, fullAccess: permission(), onlineRoute: false))
+    XCTAssertEqual(reads, 0, "未配置在线服务时也不应读取权限")
+    XCTAssertTrue(KeyboardViewController.canFillGloss(
+      japanese, fullAccess: permission(), onlineRoute: true))
+    XCTAssertEqual(reads, 1, "需要网络的释义仍须检查系统权限")
+    XCTAssertFalse(KeyboardViewController.canFillGloss(
+      japanese, fullAccess: permission(false), onlineRoute: true))
+    XCTAssertEqual(reads, 2)
+    CandidateTranslationPreference.onlineEnabled = false
+    XCTAssertFalse(KeyboardViewController.canFillGloss(
+      japanese, fullAccess: permission(), onlineRoute: true))
+    XCTAssertEqual(reads, 2, "在线释义关闭时不读权限")
   }
 
   func testTheUsersOwnServiceOutranksTheOfflineDictionaryWhichOutranksTheAccount() {

@@ -1248,9 +1248,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     return data
   }
 
-  /// The HTTPS cloud candidate URL the shared host builds for an eligible query.
+  /// 兼容 GET 查询的共享云候选地址；完整请求通过在线查询描述符执行。
   static func cloudRequestURL(query: Data) -> URL? {
-    guard !query.isEmpty, query.count <= 16_384 else { return nil }
+    guard !query.isEmpty, query.count <= 131_072 else { return nil }
     let value = query.withUnsafeBytes { bytes in
       try? decode(msimeClientCloudRequestURL(bytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(query.count)))
     }
@@ -1262,7 +1262,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   func applyCloudResponse(query: Data, body: Data) throws -> [String: Any] {
     flushPendingCharacters()
     guard handle != 0 else { throw InputBridgeFailure.unavailable }
-    guard !query.isEmpty, query.count <= 16_384, !body.isEmpty, body.count <= 262_144 else {
+    guard !query.isEmpty, query.count <= 131_072, !body.isEmpty, body.count <= 262_144 else {
       throw InputBridgeFailure.invalidResponse
     }
     return try query.withUnsafeBytes { queryBytes in
@@ -1280,7 +1280,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   /// The AI HTTPS request descriptor for a query, or nil when the assistant's settings no longer match it. It carries the provider credential: never log it.
   func aiRequest(query: Data) -> [String: Any]? {
     flushPendingCharacters()
-    guard handle != 0, !query.isEmpty, query.count <= 16_384 else { return nil }
+    guard handle != 0, !query.isEmpty, query.count <= 131_072 else { return nil }
     return query.withUnsafeBytes { bytes in
       (try? Self.decode(msimeClientAIRequestForQuery(
         handle, bytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(query.count)))) as? [String: Any]
@@ -1356,7 +1356,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     flushPendingCharacters()
     guard handle != 0 else { throw InputBridgeFailure.unavailable }
     let payload = try JSONSerialization.data(withJSONObject: candidates)
-    guard !query.isEmpty, query.count <= 16_384, payload.count <= 16_384, source <= 1 else {
+    guard !query.isEmpty, query.count <= 131_072, payload.count <= 16_384, source <= 1 else {
       throw InputBridgeFailure.invalidResponse
     }
     return try query.withUnsafeBytes { queryBytes in
@@ -1375,7 +1375,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   func resolveOnlineCandidates(query: Data, source: UInt8) throws -> [String: Any] {
     flushPendingCharacters()
     guard handle != 0 else { throw InputBridgeFailure.unavailable }
-    guard !query.isEmpty, query.count <= 16_384, source <= 1 else {
+    guard !query.isEmpty, query.count <= 131_072, source <= 1 else {
       throw InputBridgeFailure.invalidResponse
     }
     return try query.withUnsafeBytes { queryBytes in
@@ -1628,12 +1628,22 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     if privateSession { _ = try? Self.decode(msimeClientSetPrivateSession(handle, true)) }
   }
 
-  func localDictionaryStateVersion() throws -> String {
-    // A runtime that failed to prepare has no options to describe, and asking the snapshot API about the empty dictionary only answers "invalid snapshot options" - which the snapshot worker then shows in place of the real reason on the keyboard's diagnostic line.
+  /// 主线程复制选项；后台版本读取不访问可变会话，也不占用按键线程。
+  func dictionaryStateVersionOptions() throws -> Data {
+    // 初始化失败时保留原诊断，不让空选项的版本错误盖掉它。
     if let initializationDiagnostic, options["user_data"] == nil {
       throw InputBridgeFailure.response(initializationDiagnostic)
     }
-    let result = try Self.callOptions(msimeClientSnapshotVersion, options)
+    return try JSONSerialization.data(withJSONObject: options)
+  }
+
+  func localDictionaryStateVersion() throws -> String {
+    try Self.localDictionaryStateVersion(preparedOptions: dictionaryStateVersionOptions())
+  }
+
+  /// 这个 C ABI 只读文件版本，不使用线程绑定的会话句柄。
+  static func localDictionaryStateVersion(preparedOptions: Data) throws -> String {
+    let result = try callDirectory(msimeClientSnapshotVersion, preparedOptions)
     guard let version = result["version"] as? String, version.utf8.count == 64,
           let generation = result["generation"] as? String,
           generation == "legacy" || UUID(uuidString: generation)?.uuidString == generation else {

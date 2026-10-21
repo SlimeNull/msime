@@ -14,7 +14,9 @@ use crate::assets;
 use crate::cantonese;
 use crate::diagnostics;
 use crate::error::{EngineError, Result};
-use crate::helpcode::{is_supported_helpcode_schema, load_helpcode_keymap, SharedKeymap};
+use crate::helpcode::{
+    is_supported_helpcode_schema, load_helpcode_keymap_with_fallback, SharedKeymap,
+};
 use crate::ime::queries::CandidateQueries;
 use crate::ime::ImeSession;
 use crate::local::date_time::LocalDateTime;
@@ -69,6 +71,7 @@ pub(super) struct InputSession {
     pub quanpin_helpcode_enabled: bool,
     pub shuangpin_helpcode_enabled: bool,
     pub helpcode_keymap: Option<SharedKeymap>,
+    pub helpcode_fallback_resources: Option<PathBuf>,
     pub chinese_punctuation_enabled: bool,
     pub punctuation_lock: i32,
     pub learning_enabled: bool,
@@ -154,6 +157,7 @@ impl InputSession {
             quanpin_helpcode_enabled: true,
             shuangpin_helpcode_enabled: true,
             helpcode_keymap: None,
+            helpcode_fallback_resources: options.helpcode_fallback_resources.clone(),
             chinese_punctuation_enabled: true,
             punctuation_lock: 0,
             learning_enabled: true,
@@ -336,12 +340,9 @@ impl InputSession {
         let microsoft_final =
             value == b';' && scheme == SchemeType::Shuangpin && self.profile.uses_semicolon_key();
         let japanese_long_vowel = value == b'-' && scheme == SchemeType::JapaneseRomaji;
-        let starts_pinyin_with_shift = shift_only
-            && self.local_mode_options.shift_letter_entry
-            && !matches!(
-                value,
-                b'U' | b'T' | b'K' | b'E' | b'M' | b'J' | b'Y' | b'R' | b'V' | b'C'
-            );
+        // 已启用的快捷入口在上面处理；被关闭或资源不可用的入口按普通大写字母继续。
+        let starts_pinyin_with_shift =
+            shift_only && self.local_mode_options.shift_letter_entry && !self.uppercase_passthrough;
         let composing_pinyin_uppercase = value.is_ascii_uppercase()
             && (self.has_composition() || starts_pinyin_with_shift)
             && matches!(scheme, SchemeType::Quanpin | SchemeType::Shuangpin);
@@ -460,6 +461,19 @@ impl InputSession {
             LocalInputMode::None => return KeyResult::unhandled(),
         };
         if !accepted {
+            // 空入口还没有模式内容，拒绝的第二枚大写留在同一组字，避免把 UV 拆开上屏。
+            if value.is_ascii_uppercase()
+                && self.local_preedit.len() == 1
+                && self.local_preedit.as_bytes()[0].is_ascii_uppercase()
+                && matches!(self.scheme(), SchemeType::Quanpin | SchemeType::Shuangpin)
+            {
+                let mut raw = self.local_preedit.clone();
+                raw.push(value as char);
+                self.reset_composition();
+                self.engine.replace_active_raw_input(&raw, &raw);
+                self.update_mixed_candidates();
+                return KeyResult::handled();
+            }
             // 不吞掉模式无法拼写的键；先提交所见原文，再由宿主继续处理当前按键。
             let mut result = self.commit_raw();
             result.handled = false;
@@ -1100,23 +1114,6 @@ impl InputSession {
         result
     }
 
-    /// Shifted capitals can start mixed English input. When that input cannot be a complete
-    /// pinyin spelling, finishing it must preserve the typed word instead of choosing a Chinese
-    /// correction as punctuation or blur does.
-    pub(super) fn shifted_incomplete_pinyin_is_literal(&self) -> bool {
-        if self.dedicated_english
-            || self.local_mode != LocalInputMode::None
-            || !matches!(self.scheme(), SchemeType::Quanpin | SchemeType::Shuangpin)
-        {
-            return false;
-        }
-        self.raw_with_cases()
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_uppercase)
-            && !self.is_all_complete_pure_pinyin()
-    }
-
     /// 数值已经出现后，表达式才收单位小写字母；光标插入与末尾输入共用这条规则。
     pub(super) fn expression_takes_unit_letter(&self, value: u8, caret: usize) -> bool {
         let text = self.local_preedit.as_bytes();
@@ -1634,7 +1631,11 @@ impl InputSession {
     }
 
     fn install_helpcode_keymap(&mut self, schema: &str) -> Result<()> {
-        let keymap = Arc::new(load_helpcode_keymap(&self.paths.resources, schema)?);
+        let keymap = Arc::new(load_helpcode_keymap_with_fallback(
+            &self.paths.resources,
+            schema,
+            self.helpcode_fallback_resources.as_deref(),
+        )?);
         self.install_helpcode_table(keymap);
         Ok(())
     }

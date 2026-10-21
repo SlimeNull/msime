@@ -2,7 +2,7 @@
 //!
 //! Engine 只有一个用户词库，这里不改它，只在 client-services 里加一层集合的元数据；词条真正写进用户词库仍然走个人词库的跨进程队列（[`PersonalDictionaryStore`]），键盘在下一次同步时应用。
 //!
-//! 存储在 `<preferences_directory>/DictionaryCollections/` 下：`index.json` 是集合列表，`index.json.lock` 是整个目录的文件锁，每个集合的词条在 `<uuid>.json`（所以停用以后还能重新启用），`outbox.json` 是还没交给个人词库队列的增删。个人词库队列同时最多只接受 128 个未完成的请求，一个两万条的集合要分很多批送进去，所以启用和停用先记进待发送队列，再由 [`DictionaryCollectionsStore::flush`] 在队列有空位时一批批送出；每次修改之后也会顺手送一批。不属于任何集合的大批词（Android 本地备份恢复的个人词库）也借这个待发送队列分批送出，见 [`DictionaryCollectionsStore::queue_words`]。
+//! 存储在 `<preferences_directory>/DictionaryCollections/` 下：`index.json` 是集合列表，`index.json.lock` 是整个目录的文件锁，每个集合的词条在 `<uuid>.json`（所以停用以后还能重新启用），`outbox.json` 是还没交给个人词库队列的增删。个人词库队列同时最多只接受 128 个未完成的请求，大型集合要分很多批送进去，所以启用和停用先记进待发送队列，再由 [`DictionaryCollectionsStore::flush`] 在队列有空位时一批批送出；每次修改之后也会顺手送一批。不属于任何集合的大批词（Android 本地备份恢复的个人词库）也借这个待发送队列分批送出，见 [`DictionaryCollectionsStore::queue_words`]。
 //!
 //! 待发送队列按词条身份（[`PersonalWord::identity`]）合并：同一个词先排了「加入」又排「删除」（或反过来）时，两者都还没送出，直接互相抵消。停用或删除一个集合时，只删除不属于任何其他已启用集合的词，Engine 自己学来的词不属于任何集合，不会被删掉。内置主词库不是集合，常开、不能停用。
 //!
@@ -27,7 +27,7 @@ use uuid::Uuid;
 /// 集合目录在偏好目录里的名字。
 pub const DIRECTORY_NAME: &str = "DictionaryCollections";
 /// 每个集合最多的词条数。
-pub const MAX_COLLECTION_ENTRIES: usize = 20_000;
+pub const MAX_COLLECTION_ENTRIES: usize = 50_000;
 /// 最多的集合个数。
 pub const MAX_COLLECTIONS: usize = 32;
 /// 集合名最多的字符数。
@@ -44,6 +44,8 @@ pub const MAX_IMPORT_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VALUE_BYTES: usize = 1024;
 /// 个人词库队列同时接受的未完成请求数（`personal.rs` 的 `MAX_ACTIVE_REQUESTS`），也是一批最多送出的条数。
 const PERSONAL_QUEUE_CAPACITY: usize = 128;
+/// 直达 Engine 的单次有界事务上限；个人队列仍保持 128 项。
+pub const ENGINE_BATCH_CAPACITY: usize = 4096;
 const MAX_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_COLLECTION_BYTES: u64 = 48 * 1024 * 1024;
 const MAX_OUTBOX_BYTES: u64 = 96 * 1024 * 1024;
@@ -112,6 +114,23 @@ struct OutboxOperation {
 #[serde(deny_unknown_fields)]
 struct OutboxFile {
     operations: Vec<OutboxOperation>,
+}
+
+#[derive(Serialize)]
+struct OutboxFileRef<'a> {
+    operations: OutboxOperations<'a>,
+}
+
+/// 序列化时只借用未发送的操作，避免每批复制整个大词库的编码和正文。
+struct OutboxOperations<'a>(&'a Outbox);
+
+impl Serialize for OutboxOperations<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.operations())
+    }
 }
 
 /// `preexisting.json`：集合加入之前用户词库当前视图里就有的词的身份，这些词不随集合删掉。
@@ -292,6 +311,53 @@ pub struct DictionaryCollectionsStore {
 struct CollectionsLock {
     directory: crate::file_lock::PrivateDirectory,
     _lock: crate::file_lock::ScopedFileLock,
+}
+
+/// 同一次有界同步中的集合刷新；作用域持有集合锁，各批发送后仍立即持久化。
+pub struct CollectionFlush<'a> {
+    store: &'a DictionaryCollectionsStore,
+    lock: CollectionsLock,
+    state: State,
+}
+
+/// 交给 Host API 直达 Engine 的集合编辑；请求 id 由集合内容稳定派生。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionEdit {
+    pub request_id: String,
+    pub previous: Option<PersonalWord>,
+    pub replacement: Option<PersonalWord>,
+}
+
+/// Engine 已提交的集合编辑结果。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionEditApplied {
+    Written,
+    AlreadyPresent,
+}
+
+impl CollectionFlush<'_> {
+    /// 收回执并发送下一批，不重新读取本作用域已经校验的集合。
+    pub fn flush(&mut self) -> Result<DictionaryCollectionsView> {
+        self.store
+            .flush_state(&self.lock.directory, &mut self.state)
+    }
+
+    /// 在集合锁内把待发项交给宿主的 Engine 批量事务；失败项回退到旧个人队列。
+    pub fn flush_with_engine<Apply>(
+        &mut self,
+        mut apply: Apply,
+    ) -> Result<DictionaryCollectionsView>
+    where
+        Apply: FnMut(
+            &[CollectionEdit],
+        ) -> std::result::Result<
+            Vec<std::result::Result<CollectionEditApplied, String>>,
+            String,
+        >,
+    {
+        self.store
+            .flush_engine_state(&self.lock.directory, &mut self.state, &mut apply)
+    }
 }
 
 impl DictionaryCollectionsStore {
@@ -662,15 +728,182 @@ impl DictionaryCollectionsStore {
 
     /// 把待发送队列里的增删在个人词库队列有空位时送进去，返回这次送出的条数。个人词库正忙（键盘持有它的锁）或队列已满时什么也不送，等下次再来。
     pub fn flush(&self) -> Result<DictionaryCollectionsView> {
+        self.begin_flush()?.flush()
+    }
+
+    /// 在原集合锁内读取并校验一次状态；调用方必须为整个刷新作用域设置时间预算。
+    pub fn begin_flush(&self) -> Result<CollectionFlush<'_>> {
         let lock = self.lock()?;
-        let mut state = self.read_state(&lock.directory)?;
-        let (sent, failure) = self.flush_locked(&lock.directory, &mut state);
+        let state = self.read_state(&lock.directory)?;
+        Ok(CollectionFlush {
+            store: self,
+            lock,
+            state,
+        })
+    }
+
+    fn flush_state(
+        &self,
+        directory: &crate::file_lock::PrivateDirectory,
+        state: &mut State,
+    ) -> Result<DictionaryCollectionsView> {
+        let (sent, failure) = self.flush_locked(directory, state);
         // 已经送出的部分先落盘，再报告送后面那部分时遇到的错误，免得下次重复送。
-        if sent > 0 || state.outbox_dirty {
-            self.write_outbox(&lock.directory, &state.outbox)?;
+        state.outbox_dirty |= sent > 0;
+        if state.outbox_dirty {
+            self.write_outbox(directory, &state.outbox)?;
+            state.outbox_dirty = false;
         }
         if let Some(error) = failure {
             return Err(error);
+        }
+        let mut view = state.view();
+        view.sent = Some(sent);
+        Ok(view)
+    }
+
+    fn flush_engine_state<Apply>(
+        &self,
+        directory: &crate::file_lock::PrivateDirectory,
+        state: &mut State,
+        apply: &mut Apply,
+    ) -> Result<DictionaryCollectionsView>
+    where
+        Apply: FnMut(
+            &[CollectionEdit],
+        ) -> std::result::Result<
+            Vec<std::result::Result<CollectionEditApplied, String>>,
+            String,
+        >,
+    {
+        if state.outbox.is_empty() {
+            let mut view = state.view();
+            view.sent = Some(0);
+            return Ok(view);
+        }
+        let queue = self.personal.read()?;
+        let receipts: HashSet<String> = queue.already_present.iter().cloned().collect();
+        if !receipts.is_empty() {
+            for identity in &receipts {
+                if state.preexisting.insert(identity.clone()) {
+                    state.preexisting_dirty = true;
+                }
+            }
+            self.write_preexisting(directory, state)?;
+            self.personal.acknowledge_already_present(&receipts)?;
+        }
+        let dropped: Vec<String> = state
+            .outbox
+            .operations()
+            .filter(|operation| {
+                operation.op == OutboxKind::Remove
+                    && state.preexisting.contains(&operation.word.identity())
+            })
+            .map(|operation| operation.word.identity())
+            .collect();
+        for identity in dropped {
+            state.outbox.take(&identity);
+            state.outbox_dirty = true;
+        }
+        if state.outbox.is_empty() {
+            self.write_outbox(directory, &state.outbox)?;
+            let mut view = state.view();
+            view.sent = Some(0);
+            return Ok(view);
+        }
+        let mut waiting = HashSet::new();
+        let mut failed = HashSet::new();
+        for request in &queue.requests {
+            let target = match request.status {
+                PersonalWordRequestStatus::Pending => &mut waiting,
+                PersonalWordRequestStatus::Failed => &mut failed,
+                PersonalWordRequestStatus::Applied => continue,
+            };
+            for word in request.previous.iter().chain(request.replacement.iter()) {
+                target.insert(word.identity());
+            }
+        }
+        drop(queue);
+
+        let mut edits = Vec::with_capacity(ENGINE_BATCH_CAPACITY);
+        for operation in state.outbox.operations() {
+            if operation.collection == UNOWNED_WORDS || edits.len() == ENGINE_BATCH_CAPACITY {
+                continue;
+            }
+            let identity = operation.word.identity();
+            if waiting.contains(&identity) || failed.contains(&identity) {
+                continue;
+            }
+            edits.push(CollectionEdit {
+                request_id: stable_collection_request_id(operation),
+                previous: (operation.op == OutboxKind::Remove).then(|| operation.word.clone()),
+                replacement: (operation.op == OutboxKind::Add).then(|| operation.word.clone()),
+            });
+        }
+        if edits.is_empty() {
+            let (sent, failure) = self.flush_locked(directory, state);
+            state.outbox_dirty |= sent > 0;
+            if state.outbox_dirty {
+                self.write_outbox(directory, &state.outbox)?;
+                state.outbox_dirty = false;
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            let mut view = state.view();
+            view.sent = Some(sent);
+            return Ok(view);
+        }
+        let outcomes = apply(&edits).map_err(|_| PersonalDictionaryError::BatchFailed)?;
+        if outcomes.len() != edits.len() {
+            return Err(PersonalDictionaryError::InvalidState.into());
+        }
+        let mut sent = 0;
+        for (edit, outcome) in edits.into_iter().zip(outcomes) {
+            let identity = edit
+                .replacement
+                .as_ref()
+                .or(edit.previous.as_ref())
+                .map(PersonalWord::identity)
+                .ok_or(DictionaryCollectionsError::Invalid)?;
+            match outcome {
+                Ok(CollectionEditApplied::Written) => {
+                    state.outbox.take(&identity);
+                    if edit.replacement.is_some() && state.preexisting.remove(&identity) {
+                        state.preexisting_dirty = true;
+                    }
+                    state.outbox_dirty = true;
+                    sent += 1;
+                }
+                Ok(CollectionEditApplied::AlreadyPresent) => {
+                    state.outbox.take(&identity);
+                    state.preexisting.insert(identity);
+                    state.preexisting_dirty = true;
+                    state.outbox_dirty = true;
+                    sent += 1;
+                }
+                Err(error) => {
+                    match self
+                        .personal
+                        .enqueue(edit.previous, edit.replacement, edit.request_id)
+                    {
+                        Ok(()) => {
+                            state.outbox.take(&identity);
+                            state.outbox_dirty = true;
+                            sent += 1;
+                        }
+                        Err(fallback) if transient(&fallback) => {}
+                        Err(fallback) => return Err(fallback.into()),
+                    }
+                    let _ = error;
+                }
+            }
+        }
+        state.prune_preexisting();
+        self.write_preexisting(directory, state)?;
+        if state.outbox_dirty {
+            self.write_outbox(directory, &state.outbox)?;
+            state.outbox_dirty = false;
         }
         let mut view = state.view();
         view.sent = Some(sent);
@@ -1001,8 +1234,8 @@ impl DictionaryCollectionsStore {
         self.write_json(
             directory,
             std::ffi::OsStr::new(OUTBOX_FILE),
-            &OutboxFile {
-                operations: outbox.operations().cloned().collect(),
+            &OutboxFileRef {
+                operations: OutboxOperations(outbox),
             },
             MAX_OUTBOX_BYTES,
         )
@@ -1144,11 +1377,10 @@ fn validate_collection(metadata: &CollectionMetadata, file: &CollectionFile) -> 
         return Err(DictionaryCollectionsError::Corrupt);
     }
     let mut identities = HashSet::with_capacity(file.entries.len());
-    if file
-        .entries
-        .iter()
-        .any(|word| !valid_stored_word(word, metadata.kind) || !identities.insert(word.identity()))
-    {
+    if file.entries.iter().any(|word| {
+        !valid_stored_word(word, metadata.kind)
+            || !identities.insert((word.key.as_str(), word.value.as_str()))
+    }) {
         return Err(DictionaryCollectionsError::Corrupt);
     }
     Ok(())
@@ -1163,7 +1395,10 @@ struct Outbox {
 
 impl Outbox {
     fn from_file(file: OutboxFile) -> Result<Self> {
-        let mut outbox = Self::default();
+        let mut outbox = Self {
+            operations: Vec::with_capacity(file.operations.len()),
+            positions: HashMap::with_capacity(file.operations.len()),
+        };
         for operation in file.operations {
             if operation.word.validate().is_err() || operation.collection.is_nil() {
                 return Err(DictionaryCollectionsError::Corrupt);
@@ -1240,6 +1475,25 @@ impl Outbox {
         }
         counts
     }
+}
+
+fn stable_collection_request_id(operation: &OutboxOperation) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(b"collections-v2\0");
+    digest.update(operation.collection.as_bytes());
+    digest.update([match operation.op {
+        OutboxKind::Add => 0,
+        OutboxKind::Remove => 1,
+    }]);
+    digest.update([operation.word.kind as u8]);
+    for text in [&operation.word.key, &operation.word.value] {
+        digest.update((text.len() as u64).to_le_bytes());
+        digest.update(text.as_bytes());
+    }
+    digest.update(operation.word.weight.to_le_bytes());
+    format!("collections-v2-{}", hex::encode(digest.finalize()))
 }
 
 /// 锁内读到的全部状态，以及这次改了哪些集合文件。
@@ -1489,6 +1743,11 @@ fn parse_import(
         "rime" => ImportFormat::Rime,
         _ => return Err(DictionaryCollectionsError::UnsupportedFormat),
     };
+    let requested = if format == SCEL_FORMAT {
+        requested
+    } else {
+        requested.for_text(text)
+    };
     // 读出了词条、全是已有的词或者集合已满，都说明列的顺序是对的。
     let usable = |parsed: &(Vec<PersonalWord>, CollectionImportReport)| {
         !parsed.0.is_empty() || parsed.1.duplicates > 0 || parsed.1.truncated
@@ -1502,7 +1761,7 @@ fn parse_import(
         _ if format == SCEL_FORMAT => None,
         ImportFormat::Standard => Some(ImportFormat::Windows),
         ImportFormat::Windows => Some(ImportFormat::Standard),
-        ImportFormat::Rime => None,
+        ImportFormat::Rime | ImportFormat::Gboard => None,
     };
     if let Some(other) = flipped {
         let mut retry = parse_rows(kind, other, text, existing, room);

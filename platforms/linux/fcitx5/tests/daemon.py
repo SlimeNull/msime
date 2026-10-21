@@ -31,7 +31,7 @@ def wait(predicate):
 def daemon_environment(root, addon):
     """把真实 daemon 的目录、插件与状态限制在合成夹具内。"""
     config = root / "config" / "fcitx5"
-    config.mkdir(parents=True)
+    config.mkdir(parents=True, exist_ok=True)
     (config / "profile").write_text(
         "[Groups/0]\nName=Default\nDefault Layout=us\nDefaultIM=msime\n"
         "[Groups/0/Items/0]\nName=keyboard-us\nLayout=\n"
@@ -134,6 +134,8 @@ def main():
             (root / "options.json").write_text(json.dumps(options))
 
         options["preferences"].update(learning=False, cloud_candidates=False)
+        # 悬浮工具栏在有 DISPLAY 时会画在屏幕右下角；这些用例只看候选和组字，不让它多出一块窗口。
+        options["preferences"]["floating_toolbar"]["enabled"] = False
         if "--wayland-punctuation" in sys.argv[4:]:
             options["preferences"]["usage_reporting"] = False
         publish()
@@ -222,7 +224,7 @@ def main():
                         return "".join(str(part[0]) for parts in (panel[2], panel[3]) for part in parts)
 
                     # Missing keys retain the old page indicator, independently of reading text.
-                    assert aux(compose(None)).startswith("1/"), "Legacy page indicator missing"
+                    assert aux(compose(None)).startswith("1 / "), "Legacy page indicator missing"
                     first = compose(False)
                     assert aux(first) == "", "Hidden page/preedit left an auxiliary line"
                     assert context.ProcessKeyEvent(ord("]"), 0, 0, False, 0)
@@ -233,7 +235,7 @@ def main():
                     assert context.ProcessKeyEvent(32, 0, 0, False, 0)
                     wait(lambda: len(commits) == 2)
                     assert commits[-1] == "你好", "Hidden indicator broke candidate selection"
-                    assert aux(compose(True)).startswith("1/"), "Re-enabled page indicator missing"
+                    assert aux(compose(True)).startswith("1 / "), "Re-enabled page indicator missing"
                     reading = aux(compose(False, "pinyin"))
                     assert "ni" in reading and "/" not in reading and not reading.startswith(" · "), \
                         "Page visibility changed the independent reading or left a separator"
@@ -326,6 +328,16 @@ def main():
                 publish()
                 control.ReloadAddonConfig("msime")
                 print("Fcitx5 智能 ABC 偏好热切换与组词上屏通过")
+                # 周边文本的光标为 0 时没有前一字符，不能读取负索引或回退到旧的输入影子。
+                for document, cursor in (("", 0), ("abc", 0), ("合成", 0), ("合成", 2)):
+                    for key, modifiers, punctuation in ((ord("."), 0, "。"), (ord("?"), 1, "？")):
+                        context.SetSurroundingText(document, dbus.UInt32(cursor), dbus.UInt32(cursor))
+                        expected = commits + [punctuation]
+                        assert context.ProcessKeyEvent(key, 0, modifiers, False, 0), \
+                            f"中文标点按键未被处理：text={document!r}, cursor={cursor}, key={chr(key)}"
+                        context.ProcessKeyEvent(key, 0, modifiers, True, 0)
+                        wait(lambda: commits == expected)
+                print("Fcitx5 文本开头与中文前文的句号、问号上屏通过")
                 context.FocusOut()
                 context.DestroyIC()
                 if os.environ.get("MSIME_TEST_GTK") == "1":

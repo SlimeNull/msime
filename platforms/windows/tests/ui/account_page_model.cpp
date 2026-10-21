@@ -43,28 +43,13 @@ std::wstring widen(const std::string &text) {
 } // namespace
 
 int main() {
-  // normalizeAccountName 与 JavaScript 的 trim 一样去掉全角空格、不换行空格和 BOM，中间的空白留着。
-  check(normalize_name(L"  水杉 小鹿\t") == L"水杉 小鹿", "ascii trim");
-  check(normalize_name(L"　 名字﻿ ") == L"名字", "unicode trim");
-  check(normalize_name(L" \t ").empty(), "blank trims to empty");
+  // 登录目标沿用现有的去空白方式；昵称规则的测试随实现迁到共享 Rust。
+  check(trim_login_target(L"  demo@example.test\t") == L"demo@example.test", "ascii trim");
+  check(trim_login_target(L"\u3000\u00a0demo@example.test\ufeff\u2028") == L"demo@example.test",
+        "unicode trim");
+  check(trim_login_target(L" \t ").empty(), "blank trims to empty");
 
-  // isValidAccountName：非空、最多 64 个码点、不含控制字符。
-  check(!valid_name(L""), "empty name is invalid");
-  check(!valid_name(L"   "), "blank name is invalid");
-  check(valid_name(L" 小鹿 "), "trimmed name is valid");
-  check(valid_name(std::wstring(64, L'名')), "64 characters");
-  check(!valid_name(std::wstring(65, L'名')), "65 characters");
-  std::wstring emoji;
-  for (int i = 0; i < 64; ++i)
-    emoji += L"\U0001F98C";
-  check(code_points(emoji) == 64 && valid_name(emoji), "a surrogate pair counts once");
-  check(!valid_name(emoji + L"\U0001F98C"), "65 surrogate pairs");
-  check(!valid_name(L"a\nb") && !valid_name(L"a\x7F") && !valid_name(std::wstring(L"a\0b", 3)),
-        "control characters");
-
-  // preferredAccountName 和账号 ID 的短写。
-  check(preferred_name(L"  小鹿 ", L"abcdef12-3456") == L"小鹿", "own name");
-  check(preferred_name(L" ", L"abcdef12-3456") == L"水杉小鹿·ABCDEF", "generated name");
+  // 账号 ID 的短写。
   check(id_label(L"0a1b2c3d-x") == L"#0A1B2C", "id label");
   check(id_label(L"ab") == L"#AB", "short id");
   check(initial(L"水杉") == L"水" && initial(L"\U0001F98C鹿") == L"\U0001F98C" && initial(L"").empty(),
@@ -142,6 +127,24 @@ int main() {
             qq_link_message(L"account_qq_link_limit").find(L"10 个") != std::wstring::npos &&
             qq_link_message(L"account_unauthorized") == error_message(L"account_unauthorized"),
         "bind messages");
+  // 有绑定时标题是「QQ 群助手」、说明换成已绑定那句，表单要点「绑定其他 QQ」才出现；绑定列表还没读到时不画表单。
+  check(qq_link_title(true) == L"QQ 群助手" && qq_link_title(false) == L"绑定 QQ 群助手", "bind card title");
+  check(qq_link_bound.substr(0, 4) == L"已绑定。" && qq_link_bound.find(L"上传到云端") != std::wstring_view::npos &&
+            qq_link_succeeded == L"绑定成功。",
+        "bind card copy");
+  check(!qq_link_form_shown(false, false, false) && qq_link_form_shown(true, false, false) &&
+            !qq_link_form_shown(true, true, false) && qq_link_form_shown(true, true, true),
+        "bind form visibility");
+
+  // 未登录的登录卡片：标题、说明和没有登录方式时的三种说法与共享页桌面那一支相同。
+  check(sign_in_welcome == L"欢迎来到水杉" &&
+            sign_in_description == L"登录后在设备之间同步设置和词库，还可以发布你的候选窗口皮肤" &&
+            sign_in_code_description == L"我们会发送一个 6 位验证码完成登录",
+        "sign-in copy");
+  check(providers_unavailable(true, true) == L"当前没有可用的验证码登录方式，请稍后重试。" &&
+            providers_unavailable(false, true) == L"正在加载登录方式…" &&
+            providers_unavailable(false, false) == L"登录方式加载失败，请重试。",
+        "providers unavailable copy");
 
   if (failures == 0)
     std::puts("account_page_model: ok");

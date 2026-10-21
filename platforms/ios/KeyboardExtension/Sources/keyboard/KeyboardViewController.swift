@@ -70,6 +70,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private weak var compositionContainer: CandidateCanvasHostView?
   private let replyModel = ReplyKeyboardModel()
   private var personalDictionaryTimer: Timer?
+  private var lastKeyTouchTime: TimeInterval = -.infinity
   private var synchronizingPersonalDictionary = false
   private let preeditButton = UIButton()
   private var appliedPreeditMenuKey: String?
@@ -161,6 +162,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var oneHandGutterWidth: NSLayoutConstraint?
   /// 长按空格键时在键区打开的语音面板。
   private var voicePanel: KeyboardVoicePanelView?
+  /// 正在进行的按住说话，录音和识别在后台的主 App 里（`KeyboardVoiceDictation`）。
+  private var voiceDictation: KeyboardVoiceDictation?
+  /// 听写开始时的输入位置；结果回来时位置变了就不直接上屏。
+  private var voiceDictationContext: KeyboardDocumentContext?
+  /// 按住空格开始听写时手指的纵坐标，用来判断上滑取消；松手后或读屏开始的听写为 nil。
+  private var voiceHoldOriginY: CGFloat?
   private let handwriting = HandwritingInputView()
   /// 手写区：标点列、书写卡片和 ⌫ / 重写列，与 Android 的 rebuildHandwritingRows 布局一致。
   private let handwritingPad = UIStackView()
@@ -273,13 +280,20 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var didRepeatBackspace = false
   private var renderedComposition = false
   private var hasComposition: Bool {
-    get { renderedComposition || session.hasPendingCharacters }
+    get { renderedComposition || hasPendingNineKeyInput }
     set { renderedComposition = newValue }
   }
   /// 测试宿主没有真实文档代理；系统扩展默认启用异步，回归可显式覆盖以检查交付顺序。
   var asynchronousNineKeyInputEnabled = Bundle.main.bundleURL.pathExtension == "appex"
   private var inputDeliveryEpoch: UInt64 = 0
   private var asynchronousInputDocument: UUID?
+  /// 连续九键查询返回的中间组字只保留最新一帧，避免主线程逐个重画候选栏；含上屏文本的快照仍立即交付。
+  private var deferredNineKeySnapshot: MetasequoiaInputSnapshot?
+  private var deferredNineKeyRenderScheduled = false
+  /// 查询已交付但最新候选尚未绘制时仍算输入中，避免提前开始空闲维护或切换方案。
+  var hasPendingNineKeyInput: Bool {
+    session.hasPendingCharacters || deferredNineKeySnapshot != nil
+  }
   private var visibleInputGeneration: UInt64?
   private var visibleCandidateIdentities: [MetasequoiaCandidateIdentity?] = []
   /// 组字中收到内存警告、引擎缓存还没清，等这次组字结束时清（见 `didReceiveMemoryWarning`）。
@@ -517,12 +531,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 手机竖屏键盘：`keyboardHeight()`。
   static var defaultKeyboardHeight: CGFloat { keyboardHeight() }
 
-  /// `onlineRoute` is whether the shared document picks a translation service at all; without one a language that needs the network can never be filled.
-  /// `offline` is the language codes whose offline gloss dictionary is installed.
-  static func canFillGloss(_ language: CandidateTranslationLanguage, fullAccess: Bool, onlineRoute: Bool,
+  /// 离线词典可直接填充释义；仅在启用了在线服务且确实需要网络时读取系统完全访问权限。
+  /// `offline` 是已安装离线释义词典的语言代码，`onlineRoute` 表示已选择翻译服务。
+  static func canFillGloss(_ language: CandidateTranslationLanguage, fullAccess: @autoclosure () -> Bool, onlineRoute: Bool,
                            offline: Set<String> = []) -> Bool {
     !CandidateTranslationPreference.needsNetwork(language, offline: offline)
-      || (CandidateTranslationPreference.onlineEnabled && fullAccess && onlineRoute)
+      || (CandidateTranslationPreference.onlineEnabled && onlineRoute && fullAccess())
   }
 
   static func configuredGlossLines(fullAccess: Bool, onlineRoute: Bool, offline: Set<String> = []) -> Int {
@@ -734,8 +748,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     personalDictionaryTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
       MainActor.assumeIsolated {
         guard let self else { return }
-        self.synchronizePersonalDictionary(force: false)
-        self.snapshotWorker.tick(idle: !self.hasComposition && !self.isInLocalMode, fullAccess: self.hasFullAccess)
+        // 异步首键尚未渲染时也在输入；词间的短暂停顿不触发同步权限和词库维护。
+        guard !self.hasComposition, !self.isInLocalMode, !self.session.hasPendingCharacters,
+              ProcessInfo.processInfo.systemUptime - self.lastKeyTouchTime >= 0.3 else { return }
+        let fullAccess = self.hasFullAccess
+        self.synchronizePersonalDictionary(force: false, fullAccess: fullAccess)
+        self.snapshotWorker.tick(idle: true, fullAccess: fullAccess)
       }
     }
   }
@@ -876,7 +894,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 空格键的 VoiceOver 提示：语音关闭时，长按空格改为移动光标。
   private static func spaceAccessibilityHint(voice: Bool) -> String {
-    voice ? "轻点输入空格或选词，左右滑动移动光标，长按打开语音输入" : "轻点输入空格或选词，左右滑动或长按移动光标"
+    voice ? "轻点输入空格或选词，左右滑动移动光标，按住说话，松开上屏" : "轻点输入空格或选词，左右滑动或长按移动光标"
   }
 
   override func selectionWillChange(_ textInput: UITextInput?) {
@@ -897,6 +915,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 自己改动的回声：那次改动之后的组字仍是当前的组字。
     if ownEditEcho.isEcho(at: ProcessInfo.processInfo.systemUptime) { return }
     session.flushPendingCharacters()
+    flushDeferredNineKeySnapshot()
     inputDeliveryEpoch &+= 1
     englishCorrectionRejectedPrefix = ""
     finishTemporaryEnglish(force: true)
@@ -927,6 +946,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     if let previous = asynchronousInputDocument, previous != document {
       inputDeliveryEpoch &+= 1
       session.flushPendingCharacters()
+      flushDeferredNineKeySnapshot()
       render(discardComposition())
       asynchronousInputDocument = document
     }
@@ -951,6 +971,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     compositionContainer?.canvasVisible = false
     candidatePanel?.canvasVisible = false
     session.flushPendingCharacters()
+    flushDeferredNineKeySnapshot()
     inputDeliveryEpoch &+= 1
     englishCorrectionRejectedPrefix = ""
     finishTemporaryEnglish(force: true)
@@ -3294,7 +3315,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     if spaceVoiceEnabled {
       actions.append(UIAccessibilityCustomAction(name: "语音输入") { [weak self] _ in
         guard let self, voiceInsertionReady else { return false }
-        showVoicePanel()
+        // 会话开着时直接开始听写，点圆球结束；没开时先打开语音面板，由它去开启会话或插入待取的结果。
+        if hasFullAccess && KeyboardVoiceDictation().sessionAvailable { startVoiceFromSpace(held: false) } else { showVoicePanel() }
         return true
       })
     }
@@ -3324,6 +3346,34 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     row.distribution = .fillEqually
     row.spacing = 6
     return row
+  }
+
+  private func flushDeferredNineKeySnapshot() {
+    guard let snapshot = deferredNineKeySnapshot else {
+      deferredNineKeyRenderScheduled = false
+      return
+    }
+    deferredNineKeySnapshot = nil
+    deferredNineKeyRenderScheduled = false
+    render(snapshot)
+  }
+
+  private func deliverNineKeySnapshot(_ snapshot: MetasequoiaInputSnapshot,
+                                      epoch: UInt64, document: UUID?) {
+    guard inputDeliveryEpoch == epoch, isChineseMode, inputScheme == .nineKey,
+          KeyboardHostContext.documentIdentifier(for: textDocumentProxy) == document else { return }
+    if snapshot.commitText != nil {
+      flushDeferredNineKeySnapshot()
+      render(snapshot)
+      return
+    }
+    deferredNineKeySnapshot = snapshot
+    guard !deferredNineKeyRenderScheduled else { return }
+    deferredNineKeyRenderScheduled = true
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.flushDeferredNineKeySnapshot()
+    }
   }
 
   private func handleCharacter(_ character: String) {
@@ -3375,9 +3425,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         asynchronousInputDocument = document
         let epoch = inputDeliveryEpoch
         if session.enqueueNineKeyCharacter(character, completion: { [weak self] snapshot in
-          guard let self, inputDeliveryEpoch == epoch, isChineseMode, inputScheme == .nineKey,
-                KeyboardHostContext.documentIdentifier(for: textDocumentProxy) == document else { return }
-          render(snapshot)
+          self?.deliverNineKeySnapshot(snapshot, epoch: epoch, document: document)
         }) { return }
       }
       render(session.handleCharacter(character))
@@ -3963,6 +4011,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       configuration.image = separator ? nil : (letterCaseState == .capsLock ? Self.capsLockIcon : Self.shiftIcon)
       configuration.title = separator ? "分词" : nil
       configuration.titleTextAttributesTransformer = Self.functionLabelTransformer
+      // 默认内边距让 44pt 宽的键只剩十几点给标题，「分词」会折成两行；与 14 键的分词键一样不留内边距，图标本来就居中。
+      configuration.contentInsets = .zero
       configuration.background.backgroundColor = on ? skin.keyBackground : skin.functionKeyBackground
       configuration.baseForegroundColor = on ? skin.accent : skin.keyForeground
       button.configuration = configuration
@@ -4526,18 +4576,40 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       if !spaceHoldMovesCursor {
         countKeyPress(TypingKeyID.space)
         playInputClick()
-        startVoiceFromSpace()
+        startVoiceFromSpace(held: true, originY: hold.location(in: view).y)
       }
     }
     if spaceHoldMovesCursor {
       handleSpaceCursorMovement(hold.state, at: hold.location(in: view).x,
                                 velocity: 0, space: hold.view as? UIButton)
+    } else if let dictation = voiceDictation, let originY = voiceHoldOriginY {
+      // 按住说话：松开结束，上滑超过键盘高度的四分之一后松开取消（Android 的 `VoiceHoldPolicy`）。
+      switch hold.state {
+      case .changed:
+        voicePanel?.setCancelling(Self.voiceHoldCancels(originY: originY, y: hold.location(in: view).y,
+                                                        height: view.bounds.height))
+      case .ended:
+        voiceHoldOriginY = nil
+        if voicePanel?.isCancelling == true { closeKeyboardPicker() } else { dictation.finish() }
+      case .cancelled, .failed:
+        closeKeyboardPicker()
+      default:
+        break
+      }
     }
     if [.ended, .cancelled, .failed].contains(hold.state) { spaceHoldMovesCursor = false }
   }
 
-  /// 键盘扩展不能录音；长按空格直接把用户带到主 App 的录音页，由深链进入逻辑自动开始录音。
-  private func startVoiceFromSpace() {
+  /// 对应 Android 的 `VoiceHoldPolicy.CANCEL_ZONE_FRACTION`。
+  static let voiceCancelFraction: CGFloat = 0.25
+
+  /// 按住说话时手指从按下处上滑超过键盘高度的四分之一就进入取消区。
+  static func voiceHoldCancels(originY: CGFloat, y: CGFloat, height: CGFloat) -> Bool {
+    originY - y > height * voiceCancelFraction
+  }
+
+  /// 长按空格说话。键盘扩展不能录音，录音识别由后台的主 App 做（`VoiceSessionService`）：会话开着时在键区显示聆听界面并开始听写，结果回来直接上屏；会话还没开或已经过期时打开 App 开启它，用户回来再按住空格。`held` 为假时是读屏操作开始的听写，点圆球结束。
+  private func startVoiceFromSpace(held: Bool, originY: CGFloat? = nil) {
     guard hasFullAccess else {
       showDiagnostic("语音输入需要开启键盘的“允许完全访问”。")
       renderCandidateStrip()
@@ -4546,10 +4618,88 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     guard voiceInsertionReady else { return }
     closeKeyboardService()
     closeKeyboardPicker()
-    KeyboardAppLauncher.open(KeyboardAppLauncher.voiceURL, from: self)
+    let dictation = KeyboardVoiceDictation()
+    guard dictation.sessionAvailable else {
+      openVoiceSession()
+      return
+    }
+    voiceDictationContext = KeyboardHostContext.documentIdentifier(for: textDocumentProxy).map {
+      KeyboardDocumentContext(document: $0, before: textDocumentProxy.documentContextBeforeInput,
+                              selected: textDocumentProxy.selectedText, after: textDocumentProxy.documentContextAfterInput)
+    }
+    voiceHoldOriginY = held ? originY : nil
+    let panel = KeyboardVoicePanelView(dictationHeld: held, skin: KeyboardTheme.current)
+    panel.onCancel = { [weak self] in self?.closeKeyboardPicker() }
+    panel.onOrb = { [weak self] in self?.voiceDictation?.finish() }
+    dictation.onEvent = { [weak self] event in self?.handleVoiceDictation(event) }
+    voiceDictation = dictation
+    voicePanel = panel
+    // 按着的手指属于空格键，面板盖住键区时不能让这一行停止接收触摸，否则松开和上滑都收不到。
+    installPanel(panel, keepsKeyTouches: held)
+    dictation.start()
   }
 
-  /// 键区里的语音结果面板。键盘扩展不能录音，面板只负责读取待插入的交接结果；长按空格改走 `startVoiceFromSpace()` 直接打开主 App 的录音页。点圆球时会核对结果与当前编辑器是否对得上，与 `showKeyboardVoice` 插入前的检查一样。
+  /// 打开 App 的语音会话页。打不开时说明原因，不让长按空格看起来毫无反应。
+  private func openVoiceSession() {
+    KeyboardAppLauncher.open(KeyboardAppLauncher.voiceSessionURL, from: self) { [weak self] opened in
+      guard !opened else { return }
+      DispatchQueue.main.async {
+        self?.showDiagnostic("未能打开水杉，请手动打开水杉 App 开启语音。")
+        self?.renderCandidateStrip()
+      }
+    }
+  }
+
+  private func handleVoiceDictation(_ event: KeyboardVoiceDictation.Event) {
+    switch event {
+    case .listening(let text):
+      voicePanel?.showListening(text)
+    case .recognizing(let text, let message):
+      voicePanel?.showRecognizing(text: text, message: message)
+    case .finished(let text):
+      let context = voiceDictationContext
+      endVoiceDictation()
+      insertVoiceResult(text, context: context)
+    case .failed(let message, let reopensSession):
+      endVoiceDictation()
+      showDiagnostic(message)
+      renderCandidateStrip()
+      if reopensSession { openVoiceSession() }
+    }
+  }
+
+  /// 听写已经结束：收起面板，不再向 App 发取消。
+  private func endVoiceDictation() {
+    voiceDictation = nil
+    voiceDictationContext = nil
+    voiceHoldOriginY = nil
+    closeKeyboardPicker()
+  }
+
+  /// 输入位置还和听写开始时一样就直接上屏；变了就把结果留在语音交接里，可以在功能菜单的「语音结果」里插入（Android 留在语音结果面板里）。
+  private func insertVoiceResult(_ text: String, context: KeyboardDocumentContext?) {
+    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      showDiagnostic("没有听到内容，请靠近麦克风再试。")
+      renderCandidateStrip()
+      return
+    }
+    if hasFullAccess, voiceInsertionReady, let context,
+       context.matches(document: KeyboardHostContext.documentIdentifier(for: textDocumentProxy),
+                       before: textDocumentProxy.documentContextBeforeInput, selected: textDocumentProxy.selectedText,
+                       after: textDocumentProxy.documentContextAfterInput) {
+      insertOwnText(text, source: .voice)
+      return
+    }
+    do {
+      try VoiceTextHandoffStore().save(text)
+      showDiagnostic("输入位置已变化，结果已保留，可在功能菜单的“语音结果”里插入。")
+    } catch {
+      showDiagnostic(error.localizedDescription)
+    }
+    renderCandidateStrip()
+  }
+
+  /// 键区里的语音结果面板，读屏的「语音输入」操作在语音会话还没开时打开它：有待插入的交接结果时点圆球插入，没有时点圆球去 App 开启语音会话；长按空格走 `startVoiceFromSpace(held:originY:)`。插入前会核对结果与当前编辑器是否对得上，与 `showKeyboardVoice` 插入前的检查一样。
   private func showVoicePanel() {
     guard hasFullAccess else {
       showDiagnostic("语音输入需要开启键盘的“允许完全访问”。")
@@ -4576,7 +4726,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       guard let self else { return }
       closeKeyboardPicker()
       guard let entry else {
-        KeyboardAppLauncher.open(KeyboardAppLauncher.voiceURL, from: self)
+        openVoiceSession()
         return
       }
       insertVoiceHandoff(entry, store: store, context: context)
@@ -4612,8 +4762,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     panel.removeFromParent()
   }
 
-  private func synchronizePersonalDictionary(force: Bool) {
-    guard hasFullAccess, !hasComposition, !isInLocalMode, !synchronizingPersonalDictionary else { return }
+  private func synchronizePersonalDictionary(force: Bool, fullAccess: Bool? = nil) {
+    guard !hasComposition, !isInLocalMode, !synchronizingPersonalDictionary,
+          fullAccess ?? hasFullAccess else { return }
     let store = PersonalDictionaryStore()
     do {
       let state = try store.read()
@@ -5635,6 +5786,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   private func handleBackspace() {
+    session.flushPendingCharacters()
+    flushDeferredNineKeySnapshot()
     if !handwriting.isHidden && handwriting.hasInk { handwriting.canvas.undo(); return }
     playInputClick()
     // Deleting document text may take the opening half of a pair with it; a backspace inside a spelling only edits the spelling.
@@ -5812,6 +5965,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   private func handleSpace() {
+    session.flushPendingCharacters()
+    flushDeferredNineKeySnapshot()
     if !handwriting.isHidden && handwriting.hasInk { _ = handwriting.commitFirst(); return }
     playInputClick()
     // A space right after a committed Chinese mark rewrites it as ASCII and is swallowed: the
@@ -5871,6 +6026,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   // newline after every committed word, and in a field whose return key is 发送 or 完成 it also
   // fired that field's primary action. macOS swallows Return during a composition for this reason.
   private func handleReturn() {
+    session.flushPendingCharacters()
+    flushDeferredNineKeySnapshot()
     defer { finishTemporaryEnglish() }
     if !handwriting.isHidden && handwriting.hasInk { _ = handwriting.commitFirst(); return }
     playInputClick()
@@ -6105,6 +6262,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   private func render(_ snapshot: MetasequoiaInputSnapshot, source originalSource: TypingSource? = nil,
                       appendingLiteral: String? = nil) {
+    // 控制命令已产生更新快照时，之前数字的候选帧不能再覆盖选词、删除或模式切换后的状态。
+    deferredNineKeySnapshot = nil
     candidateRevision &+= 1
     // 下面的 `updateCandidateStrip` 用这次快照的候选盖掉 1 键放进来的常用标点。
     nineKeyQuickSymbols = []
@@ -6788,13 +6947,21 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 复用构造释义行时已经算好的内容宽度，避免再次转换富文本并测量首行。
   private func pinCandidateWidth(of button: KeyboardKeyButton, contentWidth: CGFloat?) {
+    let minimumWidth = candidatePalette?.layout?.itemMinWidth?.dip(fontSize: Self.candidateChipFontSize * candidateFontScale) ?? 0
+    if let minimum = button.constraints.first(where: { $0.identifier == "candidateSkinMinimumWidth" }) {
+      minimum.constant = minimumWidth
+    } else {
+      let minimum = button.widthAnchor.constraint(greaterThanOrEqualToConstant: minimumWidth)
+      minimum.identifier = "candidateSkinMinimumWidth"
+      minimum.isActive = true
+    }
     let existing = button.constraints.first { $0.identifier == "candidateChipWidth" }
     guard let contentWidth else {
       if existing?.isActive == true { existing?.isActive = false }
       return
     }
     let insets = button.configuration?.contentInsets ?? .zero
-    let width = ceil(contentWidth + insets.leading + insets.trailing)
+    let width = max(minimumWidth, ceil(contentWidth + insets.leading + insets.trailing))
     if let existing {
       guard !existing.isActive || abs(existing.constant - width) > 0.5 else { return }
       existing.constant = width
@@ -6817,12 +6984,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     if let palette = candidatePalette {
       // canvas 首选用选中色，其余透明；既有桌面配色保留「首选高亮」取色器的 hover 语义。
       configuration.background.customView = number == 1 && palette.showSelectedBar
-        ? CandidateSelectionBarView(color: palette.selectedBar ?? palette.accent) : nil
+        ? CandidateSelectionBarView(color: palette.selectedBar ?? palette.accent, layout: palette.layout,
+                                    fontSize: Self.candidateChipFontSize * candidateFontScale) : nil
       configuration.background.backgroundColor = converting ? palette.selected.withAlphaComponent(0.35)
         : number == 1 ? (candidateCanvasSkin == nil ? palette.hover : palette.selected)
         : candidateCanvasSkin == nil ? palette.surface : .clear
-      configuration.background.cornerRadius = candidateCanvasSkin?.itemCornerRadius ?? 9
-      configuration.background.strokeWidth = 1
+      configuration.background.cornerRadius = candidatePalette?.layout?.itemRadius ?? candidateCanvasSkin?.itemCornerRadius ?? 9
+      configuration.background.strokeWidth = palette.layout?.borderWidth ?? 1
       configuration.background.strokeColor = palette.border
       configuration.baseForegroundColor = palette.text
       button.layer.shadowOpacity = 0
@@ -6842,7 +7010,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let selected = candidatePalette == nil && number == 1
     let weight: UIFont.Weight = selected ? .semibold : .regular
     // A pinned word takes the accent colour, as it does in the Windows candidate window; chips are reused, so every other word is set back.
-    let pinned = markers.contains { $0.symbol == "pin.fill" }
+    let pinned = markers.contains(where: \.pinned)
     configuration.baseForegroundColor = pinned || selected
       ? candidatePalette?.accent ?? skin.accent
       : (number == 1 ? candidatePalette?.selectedText : nil) ?? candidatePalette?.text ?? skin.keyForeground
@@ -6896,6 +7064,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       }
       configuration.attributedTitle = title
     }
+    configuration.contentInsets = candidatePalette?.layout?.chipInsets(fontSize: candidateFont.pointSize, fallback: Self.candidateChipInsets) ?? Self.candidateChipInsets
     button.configuration = configuration
     button.titleLineCount = 1 + lines.count
     pinCandidateWidth(of: button, contentWidth: contentWidth)
@@ -6922,7 +7091,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   static func markerRun(_ markers: [CandidateMarker], color: UIColor, scale: CGFloat) -> AttributedString {
     let font = CandidateFontPreference.font(.caption1, scale: scale)
     var run = AttributedString()
-    for marker in markers {
+    for marker in markers where !marker.symbol.isEmpty {
       guard let image = UIImage(systemName: marker.symbol, withConfiguration: UIImage.SymbolConfiguration(font: font))?
         .withTintColor(color, renderingMode: .alwaysOriginal) else { continue }
       run += AttributedString(" ")
@@ -7299,7 +7468,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   /// 在键区显示 `panel`：位于顶栏之下、按键之上，面板打开期间按键隐藏，透明面板就不会透出它们。工具栏留在上方且可操作，因为关面板靠的就是它的按钮。
-  private func installPanel(_ panel: UIView) {
+  /// `keepsKeyTouches` 为真时键区只是看不见，按着的手指（按住空格说话）照常收到松开和移动；新的触摸落在面板上。
+  private func installPanel(_ panel: UIView, keepsKeyTouches: Bool = false) {
     guard let root = keyboardRoot, let topRow = compositionContainer else { return }
     // 面板替换回复面板的方式与替换按键相同。
     if replyKeyboardShown { closeReplyKeyboard() }
@@ -7313,7 +7483,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       panel.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       panel.trailingAnchor.constraint(equalTo: root.trailingAnchor),
     ])
-    setKeyRowsCovered(true)
+    setKeyRowsCovered(true, keepsTouches: keepsKeyTouches)
     updateToolbarActiveState()
     UIAccessibility.post(notification: .layoutChanged, argument: panel)
   }
@@ -7324,10 +7494,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   /// 隐藏或恢复顶栏下面的所有行，以及它们旁边的单手模式侧栏。这些行保留布局，键盘高度不变；它们只是不再绘制、不再接收触摸。
-  private func setKeyRowsCovered(_ covered: Bool) {
+  private func setKeyRowsCovered(_ covered: Bool, keepsTouches: Bool = false) {
     for row in keyColumn.arrangedSubviews + [oneHandGutter] {
       row.alpha = covered ? 0 : 1
-      row.isUserInteractionEnabled = !covered
+      row.isUserInteractionEnabled = !covered || keepsTouches
       row.accessibilityElementsHidden = covered
     }
   }
@@ -7490,10 +7660,34 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         self?.deleteOwnBackward()
       },
       onClose: { [weak self] in self?.closeKeyboardPicker() },
-      onABC: { [weak self] in self?.closeKeyboardPicker() })
+      onABC: { [weak self] in self?.closeKeyboardPicker() },
+      onSticker: { [weak self] sticker in self?.copySticker(sticker) })
     applyEmojiPickerAppearance(picker)
     emojiPicker = picker
     installPanel(picker)
+  }
+
+  /// 键盘扩展没有把图片插进输入框的接口，表情包转成 PNG 放进系统剪贴板，由用户长按输入框粘贴。没有完全访问时写剪贴板会被系统静默丢弃，所以先提示去打开。
+  private func copySticker(_ sticker: KeyboardStickerCatalog.Sticker) {
+    playInputClick()
+    guard hasFullAccess else {
+      showDiagnostic(KeyboardStickerCatalog.needsFullAccessMessage)
+      renderCandidateStrip()
+      return
+    }
+    DispatchQueue.global(qos: .userInitiated).async {
+      let png = KeyboardStickerCatalog.pngData(sticker)
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        if let png {
+          UIPasteboard.general.setData(png, forPasteboardType: KeyboardStickerCatalog.pasteboardType)
+          showDiagnostic(KeyboardStickerCatalog.copiedMessage(sticker))
+        } else {
+          showDiagnostic(KeyboardStickerCatalog.copyFailedMessage)
+        }
+        renderCandidateStrip()
+      }
+    }
   }
 
   /// 按键区里的表情面板与键盘明暗一致时透出键盘背景；表情面板单独设成另一种明暗时铺上自己的皮肤底色，否则按键和颜文字会按面板的明暗着色、却画在键盘明暗的背景上。
@@ -7663,6 +7857,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       voicePanel = nil
       UIAccessibility.post(notification: .layoutChanged, argument: spaceButton)
     }
+    // 听写还没结束时面板被关掉（点面板、上滑取消、键盘收起、换出别的面板）就取消它。
+    if let dictation = voiceDictation {
+      voiceDictation = nil
+      voiceDictationContext = nil
+      voiceHoldOriginY = nil
+      dictation.cancel()
+    }
     if keyAreaPanel != nil {
       keyAreaPanel = nil
       setKeyRowsCovered(false)
@@ -7755,9 +7956,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     if let emojiPicker { applyEmojiPickerAppearance(emojiPicker) }
   }
 
+  /// 默认从 App Group 读取；测试可在创建视图前注入独立的合成皮肤目录。
+  var candidateSkinsRoot: URL? = ExternalCandidateSkin.defaultRoot
+
   private func currentCandidatePalette() -> CandidatePalette? {
     CandidatePalette.active(in: session.sharedPreferences, systemDark: drawsDark,
-                            canvasPanelDrawn: candidateCanvasSkin?.panelLoaded == true)
+                            skinsRoot: candidateSkinsRoot, canvasPanelDrawn: candidateCanvasSkin?.panelLoaded == true)
   }
 
   /// 候选主题独立决定明暗；资源只在主题、模式或清单变化时重载，异步旧结果不能覆盖新选择。
@@ -7765,13 +7969,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let preferences = session.sharedPreferences
     let dark = CandidatePalette.isDark(candidateTheme: preferences?["candidate_theme"] as? String,
                                        appMode: preferences?["theme"] as? String, systemDark: drawsDark)
-    let resolved = CandidatePalette.followsDesktop ? CandidatePalette.resolveTheme(preferences, systemDark: drawsDark) : nil
+    let resolved = CandidatePalette.followsDesktop ? CandidatePalette.resolveTheme(preferences, systemDark: drawsDark, skinsRoot: candidateSkinsRoot) : nil
     let id = resolved?.candidateSkin
-    let root = ExternalCandidateSkin.defaultRoot
+    let root = candidateSkinsRoot
     var custom = GlobalThemePreference.customTheme(in: preferences)
     custom.removeValue(forKey: "keyboard")
     var request: [String: Any] = ["enabled": CandidatePalette.followsDesktop, "dark": dark,
       "theme": GlobalThemePreference.theme(in: preferences), "custom": custom]
+    if let root { request["skins_root"] = root.path }
     if let id, let root {
       let manifest = root.appendingPathComponent(id).appendingPathComponent("skin.toml")
       let attributes = try? FileManager.default.attributesOfItem(atPath: manifest.path)
@@ -7804,6 +8009,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   private func applyCandidateAppearance() {
     candidateButtonStyleRevision &+= 1
+    candidateStack.spacing = candidatePalette?.layout?.horizontalGap(fontSize: Self.candidateChipFontSize * candidateFontScale) ?? 6
     let skin = KeyboardTheme.current
     compositionContainer?.canvas = candidateCanvasSkin
     updateCandidateCanvasMetrics()
@@ -7863,6 +8069,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   @objc private func prepareKeyFeedback() {
+    lastKeyTouchTime = ProcessInfo.processInfo.systemUptime
     if KeyboardFeedbackPreference.hapticsEnabled { keyFeedback.prepare() }
   }
 

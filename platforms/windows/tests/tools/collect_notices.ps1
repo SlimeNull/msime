@@ -17,7 +17,9 @@ try {
         'resources/licenses/rime-cantonese-CC-BY-4.0.txt',
         'resources/licenses/libchewing-data-LGPL-2.1.txt', 'resources/licenses/rime-stroke-LGPL-3.0.txt',
         'resources/licenses/vi-MIT.txt', 'resources/licenses/ewts-MIT.txt',
+        'platforms/windows/msimeui/UPSTREAM.md', 'platforms/windows/msimeui/LICENSE',
         'platforms/windows/third_party/miniaudio/LICENSE', 'shared/voice/third_party/cppcodec/LICENSE',
+        'platforms/windows/settings/assets/feedback/NOTICE.md',
         'resources/licenses/OpenCC-Apache-2.0.txt', 'plugins/script/LICENSE', 'plugins/phrase_table/LICENSE')
     foreach ($relative in $repositoryNotices) {
         $path = Join-Path $root $relative

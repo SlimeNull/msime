@@ -260,6 +260,54 @@ fn online_provider_deduplicates_before_enforcing_source_quota() {
 
 #[cfg(unix)]
 #[test]
+fn online_provider_uses_shared_custom_response_parser() {
+    use msime_client_core::cloud::candidates::{
+        build_request, CloudCandidatePreferences, CloudCandidateSource, CloudResponseFormat,
+    };
+    let directory = private_tempdir();
+    let socket = directory.path().join("online.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(stream.try_clone().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["query"]["cloud_request"]["response_path"], "data.0");
+        let reply = json!({"candidates": [], "cloud_response": r#"{"data":["合成套接字候选"]}"#})
+            .to_string()
+            + "\n";
+        std::io::Write::write_all(&mut stream, reply.as_bytes()).unwrap();
+    });
+    let mut query: OnlineQuery = serde_json::from_value(json!({
+        "scheme": 0, "generation": 1, "identity": "synthetic", "query_text": "nihao",
+        "cache_key": "synthetic", "pinyin_segments": ["ni", "hao"], "cloud_eligible": true,
+        "cloud_candidates": true, "ai_eligible": false, "session_id": 5
+    }))
+    .unwrap();
+    query.cloud_request = build_request(
+        &CloudCandidatePreferences {
+            source: CloudCandidateSource::Custom,
+            endpoint: "https://cloud.example.invalid/?q={query}".into(),
+            response_format: CloudResponseFormat::JsonPath,
+            cache_enabled: false,
+            ..Default::default()
+        },
+        "nihao",
+        false,
+    );
+    assert_eq!(
+        UnixSocketProvider::new(socket).query_candidates(query),
+        Some(vec![("合成套接字候选".into(), 0)])
+    );
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn online_provider_filtered_sources_keep_empty_result_unallocated() {
     let directory = private_tempdir();
     let socket = directory.path().join("online.sock");
@@ -2193,6 +2241,8 @@ struct PhraseEngine {
     words: Vec<String>,
     /// Published with nothing composed, as the Engine publishes `/` and `@` when their modes are on.
     idle_symbols: String,
+    /// 非空时快照报告正在整句改字（`View::conversion`）；`MoveHome` 像真引擎一样先退出改字，把它清空。
+    conversion: String,
 }
 
 impl PhraseEngine {
@@ -2203,6 +2253,7 @@ impl PhraseEngine {
             consumes,
             words: vec!["海滩".into(), "跑步".into()],
             idle_symbols: String::new(),
+            conversion: String::new(),
         }
     }
 }
@@ -2240,6 +2291,7 @@ impl InputEngine for PhraseEngine {
             editing_text: self.reading.clone(),
             caret_position: self.caret.min(self.reading.len()),
             segment_raw_boundaries: Vec::new(),
+            conversion: self.conversion.clone(),
             candidates: if self.reading.is_empty() {
                 Vec::new()
             } else {
@@ -2258,7 +2310,10 @@ impl InputEngine for PhraseEngine {
             // 与真引擎的字母光标一致：每次移一个字符，到两端就停住（这里没有本地模式的前缀字母）。
             Command::MoveLeft => self.caret = self.caret.saturating_sub(1),
             Command::MoveRight => self.caret = (self.caret + 1).min(self.reading.len()),
-            Command::MoveHome => self.caret = 0,
+            Command::MoveHome => {
+                self.conversion.clear();
+                self.caret = 0;
+            }
             Command::MoveEnd => self.caret = self.reading.len(),
             Command::Backspace => {
                 if self.caret > 0 {
@@ -2370,53 +2425,167 @@ fn phrase_runtime(reading: &str, consumes: Vec<usize>) -> Runtime<PhraseEngine> 
     runtime
 }
 
-/// `navigation.left_right`：左右键先编辑输入串，光标已经停在要移动的那一端时，这一次按键才换成移动
-/// 候选高亮，与 ↑/↓ 走同一段代码。关着时两个键都还是普通光标命令。
+/// `navigation.left_right`：首选上 ← 编辑输入串，→ 先把光标送回输入串末尾、到了末尾才选下一个；高亮不在首选时左右键只移动候选，与 ↑/↓ 走同一段代码。关着时两个键都还是普通光标命令。
 #[test]
-fn left_right_edits_the_input_string_before_it_moves_the_highlight() {
+fn left_right_edits_only_on_the_first_candidate() {
+    let highlighted = |view: &View| {
+        view.candidates
+            .iter()
+            .find(|candidate| candidate.highlighted)
+            .map(|candidate| candidate.text.clone())
+    };
+    // 每页两个，第三个候选是第二页的第一个，但不是首选。
+    let mut engine = PhraseEngine::new(Vec::new());
+    engine.words = vec!["你好吗".into(), "你好".into(), "妮好吗".into()];
+    let mut runtime = Runtime::new(engine, 2).unwrap();
+    runtime.focus(true).unwrap();
+    for value in *b"nihaoma" {
+        runtime
+            .dispatch(Action::Character {
+                value,
+                shift: false,
+            })
+            .unwrap();
+    }
+    let mut press = |action: Action| runtime.dispatch(action).unwrap().view;
+
+    // 关着时右键在输入串末尾什么也不做，高亮留在首选。
+    let closed = press(Action::Command(Command::MoveRight));
+    assert_eq!(closed.caret_position, 7);
+    assert_eq!(highlighted(&closed).as_deref(), Some("你好吗"));
+
+    runtime.set_left_right_navigation(true);
+    let mut press = |action: Action| runtime.dispatch(action).unwrap().view;
+
+    // 首选、光标在末尾：← 是修改输入串。
+    let edited = press(Action::Command(Command::MoveLeft));
+    assert_eq!(edited.caret_position, 6);
+    assert_eq!(highlighted(&edited).as_deref(), Some("你好吗"));
+
+    // 首选、光标不在末尾：→ 先把光标送回末尾，不选候选。
+    let restored = press(Action::Command(Command::MoveRight));
+    assert_eq!(restored.caret_position, 7);
+    assert_eq!(highlighted(&restored).as_deref(), Some("你好吗"));
+
+    // 首选、光标在末尾：→ 选下一个。
+    let next = press(Action::Command(Command::MoveRight));
+    assert_eq!(next.caret_position, 7);
+    assert_eq!(highlighted(&next).as_deref(), Some("你好"));
+    assert_eq!(next.editing_text, "nihaoma");
+
+    // 不在首选：← 回到上一个候选，不动输入串。
+    let back = press(Action::Command(Command::MoveLeft));
+    assert_eq!(back.caret_position, 7);
+    assert_eq!(highlighted(&back).as_deref(), Some("你好吗"));
+
+    // 光标不在末尾时用 ↓ 离开首选，左右键也只移动候选。
+    press(Action::Command(Command::MoveLeft));
+    let down = press(Action::NextCandidate);
+    assert_eq!(down.caret_position, 6);
+    assert_eq!(highlighted(&down).as_deref(), Some("你好"));
+    let right = press(Action::Command(Command::MoveRight));
+    assert_eq!(right.caret_position, 6);
+    assert_eq!(highlighted(&right).as_deref(), Some("妮好吗"));
+
+    // 第二页的第一个不是首选：← 翻回上一页的最后一个，而不是编辑输入串。
+    let left = press(Action::Command(Command::MoveLeft));
+    assert_eq!(left.caret_position, 6);
+    assert_eq!(highlighted(&left).as_deref(), Some("你好"));
+    let first = press(Action::Command(Command::MoveLeft));
+    assert_eq!(first.caret_position, 6);
+    assert_eq!(highlighted(&first).as_deref(), Some("你好吗"));
+
+    // 回到首选后 ← 又是编辑输入串，到了开头就停住，不再移高亮。
+    press(Action::Command(Command::MoveHome));
+    let home = press(Action::Command(Command::MoveLeft));
+    assert_eq!(home.caret_position, 0);
+    assert_eq!(highlighted(&home).as_deref(), Some("你好吗"));
+}
+
+/// 竖排候选窗里左右键与候选的排列方向垂直：`navigation.left_right` 开着也只编辑输入串，高亮交给 ↑/↓。
+#[test]
+fn vertical_candidates_leave_left_right_to_the_input_string() {
     let highlighted = |view: &View| {
         view.candidates
             .iter()
             .position(|candidate| candidate.highlighted)
     };
     let mut runtime = phrase_runtime("nihaoma", Vec::new());
-
-    // 关着时右键在输入串末尾什么也不做，高亮留在首选。
-    let closed = runtime
-        .dispatch(Action::Command(Command::MoveRight))
-        .unwrap()
-        .view;
-    assert_eq!(closed.caret_position, 7);
-    assert_eq!(highlighted(&closed), Some(0));
-
-    // 打开后同一个键移到下一个候选：光标已经没有可编辑的位置了。
     runtime.set_left_right_navigation(true);
-    let next = runtime
+    runtime.set_vertical_candidates(true);
+
+    // 首选、光标在末尾：→ 不选下一个。
+    let right = runtime
         .dispatch(Action::Command(Command::MoveRight))
         .unwrap()
         .view;
-    assert_eq!(highlighted(&next), Some(1));
-    assert_eq!(next.caret_position, 7);
-    assert_eq!(next.editing_text, "nihaoma");
+    assert_eq!(right.caret_position, 7);
+    assert_eq!(highlighted(&right), Some(0));
 
-    // 左键还有可编辑的位置，仍然是编辑输入串，高亮不动。
-    let edited = runtime
+    // 不在首选：← 仍是编辑输入串，高亮不动。
+    runtime.dispatch(Action::NextCandidate).unwrap();
+    let left = runtime
         .dispatch(Action::Command(Command::MoveLeft))
         .unwrap()
         .view;
-    assert_eq!(edited.caret_position, 6);
-    assert_eq!(highlighted(&edited), Some(1));
+    assert_eq!(left.caret_position, 6);
+    assert_eq!(highlighted(&left), Some(1));
 
-    // 光标回到起点以后左键才移高亮。
-    runtime
-        .dispatch(Action::Command(Command::MoveHome))
-        .unwrap();
-    let previous = runtime
+    // 换回横排，同一个位置上 ← 回到上一个候选，光标不动。
+    runtime.set_vertical_candidates(false);
+    let horizontal = runtime
         .dispatch(Action::Command(Command::MoveLeft))
         .unwrap()
         .view;
-    assert_eq!(highlighted(&previous), Some(0));
-    assert_eq!(previous.caret_position, 0);
+    assert_eq!(horizontal.caret_position, 6);
+    assert_eq!(highlighted(&horizontal), Some(0));
+}
+
+/// Home 键分两段：高亮不在首选时先回到首选，光标不动；已经在首选时才把光标移到输入串开头。
+#[test]
+fn home_key_returns_to_the_first_candidate_before_it_moves_the_caret() {
+    let highlighted = |view: &View| {
+        view.candidates
+            .iter()
+            .position(|candidate| candidate.highlighted)
+    };
+    let mut runtime = phrase_runtime("nihaoma", Vec::new());
+    runtime.dispatch(Action::NextCandidate).unwrap();
+
+    let first = runtime.dispatch(Action::FirstCandidateOrHome).unwrap().view;
+    assert_eq!(highlighted(&first), Some(0));
+    assert_eq!(first.caret_position, 7);
+
+    let home = runtime.dispatch(Action::FirstCandidateOrHome).unwrap().view;
+    assert_eq!(highlighted(&home), Some(0));
+    assert_eq!(home.caret_position, 0);
+
+    // 日文转换用的 FirstCandidate 不分段：高亮已在首选时光标也不动。
+    runtime.dispatch(Action::Command(Command::MoveEnd)).unwrap();
+    let plain = runtime.dispatch(Action::FirstCandidate).unwrap().view;
+    assert_eq!(plain.caret_position, 7);
+}
+
+/// 整句改字时 Home 只回到首选：刚进改字时高亮就在首选，发 `MoveHome` 会让引擎退出改字、丢掉钉住的段。
+#[test]
+fn home_key_keeps_sentence_conversion() {
+    let mut engine = PhraseEngine::new(Vec::new());
+    engine.conversion = "你好吗".into();
+    let mut runtime = Runtime::new(engine, 5).unwrap();
+    runtime.focus(true).unwrap();
+    for value in *b"nihaoma" {
+        runtime
+            .dispatch(Action::Character {
+                value,
+                shift: false,
+            })
+            .unwrap();
+    }
+
+    let home = runtime.dispatch(Action::FirstCandidateOrHome).unwrap().view;
+    assert_eq!(home.conversion, "你好吗");
+    assert_eq!(home.caret_position, 7);
+    assert!(home.candidates[0].highlighted);
 }
 
 #[test]
@@ -2797,6 +2966,7 @@ fn online_provider_worker_is_bounded_and_filters_invalid_results() {
         cloud_eligible: true,
         ai_eligible: true,
         cloud_candidates: true,
+        cloud_request: None,
         session_id: 9,
         ai_context: String::new(),
         ai_assistant: None,
@@ -2845,6 +3015,7 @@ fn online_provider_worker_keeps_only_the_latest_completed_result() {
         cloud_eligible: true,
         ai_eligible: false,
         cloud_candidates: true,
+        cloud_request: None,
         session_id: 9,
         ai_context: String::new(),
         ai_assistant: None,
@@ -2893,6 +3064,7 @@ fn online_provider_worker_debounces_from_the_latest_submission() {
         cloud_eligible: true,
         ai_eligible: false,
         cloud_candidates: true,
+        cloud_request: None,
         session_id: 9,
         ai_context: String::new(),
         ai_assistant: None,
@@ -2937,6 +3109,7 @@ fn cloud_request_requires_eligible_query() {
         cloud_eligible: false,
         ai_eligible: false,
         cloud_candidates: true,
+        cloud_request: None,
         session_id: 1,
         ai_context: String::new(),
         ai_assistant: None,
@@ -4543,6 +4716,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         quick_phrase_table: Vec::new(),
         quick_phrase_candidates: false,
         helpcode_table: None,
+        helpcode_fallback_resources: None,
         sentence_association: msime_engine::host::SentenceAssociationOptions {
             word_lattice: true,
             neural_keyboard: false,
@@ -4556,19 +4730,13 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         zhuyin_dictionary: String::new(),
         stroke_dictionary: String::new(),
         japanese_dictionary: String::new(),
+        wubi_dictionary: String::new(),
     }
 }
 
 #[test]
-fn rejected_local_key_commits_the_prefix_and_passes_the_current_key_to_the_host() {
-    for (entry, rejected) in [
-        (b'U', b'i'),
-        (b'U', b'I'),
-        (b'K', b'A'),
-        (b'T', b'A'),
-        (b'E', b'1'),
-        (b'U', b'!'),
-    ] {
+fn bare_shortcut_rejected_capitals_stay_in_the_runtime_composition() {
+    for (entry, continuation) in [(b'U', b'V'), (b'U', b'I'), (b'K', b'A'), (b'T', b'A')] {
         let directory = tempfile::tempdir().unwrap();
         let session =
             msime_engine::host::Session::new(&real_engine_options(directory.path())).unwrap();
@@ -4582,6 +4750,55 @@ fn rejected_local_key_commits_the_prefix_and_passes_the_current_key_to_the_host(
             .unwrap();
         let transition = runtime
             .dispatch(Action::Character {
+                value: continuation,
+                shift: true,
+            })
+            .unwrap();
+        let expected = String::from_utf8(vec![entry, continuation]).unwrap();
+        assert!(transition.handled);
+        assert!(transition.commit.is_none());
+        assert_eq!(transition.view.local_mode, "none");
+        assert_eq!(transition.view.editing_text, expected);
+        let erased = runtime
+            .dispatch(Action::Command(Command::Backspace))
+            .unwrap();
+        assert!(erased.commit.is_none());
+        assert_eq!(erased.view.editing_text, (entry as char).to_string());
+        assert_eq!(erased.view.local_mode, "none");
+        let committed = runtime
+            .dispatch(Action::Command(Command::CommitRaw))
+            .unwrap();
+        assert_eq!(
+            committed.commit.as_deref(),
+            Some((entry as char).to_string().as_str())
+        );
+    }
+}
+
+#[test]
+fn rejected_local_key_commits_the_prefix_and_passes_the_current_key_to_the_host() {
+    for (entry, spelling, rejected) in [
+        (b'U', "", b'i'),
+        (b'U', "0", b'I'),
+        (b'K', "a", b'A'),
+        (b'T', "r", b'A'),
+        (b'E', "", b'1'),
+        (b'U', "", b'!'),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let session =
+            msime_engine::host::Session::new(&real_engine_options(directory.path())).unwrap();
+        let mut runtime = Runtime::new(session, 5).unwrap();
+        runtime.focus(true).unwrap();
+        runtime
+            .dispatch(Action::Character {
+                value: entry,
+                shift: true,
+            })
+            .unwrap();
+        type_characters(&mut runtime, spelling);
+        let transition = runtime
+            .dispatch(Action::Character {
                 value: rejected,
                 shift: rejected.is_ascii_uppercase(),
             })
@@ -4589,7 +4806,7 @@ fn rejected_local_key_commits_the_prefix_and_passes_the_current_key_to_the_host(
         assert!(!transition.handled);
         assert_eq!(
             transition.commit.as_deref(),
-            Some((entry as char).to_string().as_str())
+            Some(format!("{}{spelling}", entry as char).as_str())
         );
         assert_eq!(transition.view.local_mode, "none");
         assert!(transition.view.editing_text.is_empty());
@@ -5408,6 +5625,35 @@ fn character(runtime: &mut Runtime, value: u8) -> Transition {
             shift: value.is_ascii_uppercase(),
         })
         .unwrap()
+}
+
+#[test]
+fn literal_capitals_survive_runtime_space_selection_with_lowercase_chinese() {
+    for (scheme, input, expected) in [
+        (0, "Fnihao", "F你好"),
+        (1, "Fnihc", "F你好"),
+        (0, "NIHAO", "NIHAO"),
+        (1, "NIHC", "NIHC"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut options = real_engine_options(directory.path());
+        options.scheme = scheme;
+        rusqlite::Connection::open(std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY))
+            .unwrap()
+            .execute_batch("CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER); INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',100);")
+            .unwrap();
+        let session = msime_engine::host::Session::new(&options).unwrap();
+        let mut runtime = Runtime::new(session, 5).unwrap();
+        runtime.focus(true).unwrap();
+        for value in input.bytes() {
+            let transition = character(&mut runtime, value);
+            assert!(transition.handled && transition.commit.is_none());
+        }
+        assert_eq!(runtime.view().candidates[0].text, expected);
+        let selected = runtime.dispatch(Action::SelectHighlighted).unwrap();
+        assert_eq!(selected.commit.as_deref(), Some(expected));
+        assert!(selected.view.editing_text.is_empty());
+    }
 }
 
 #[test]
@@ -6759,6 +7005,7 @@ fn a_busy_provider_keeps_only_the_newest_completed_result() {
         cloud_eligible: true,
         ai_eligible: false,
         cloud_candidates: true,
+        cloud_request: None,
         session_id: 1,
         ai_context: String::new(),
         ai_assistant: None,
@@ -6871,6 +7118,7 @@ fn scheme_predicates_reproduce_the_ordinal_rules_they_replace() {
         cloud_eligible: true,
         ai_eligible: false,
         cloud_candidates: true,
+        cloud_request: None,
         session_id: 1,
         ai_context: String::new(),
         ai_assistant: None,

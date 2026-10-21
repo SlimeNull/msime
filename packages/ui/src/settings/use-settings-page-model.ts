@@ -5,7 +5,7 @@ import { mobilePageTitle } from "./mobile-tab-helpers";
 import { desktopDownloadUrl, fallbackAppVersion } from "./app-resources";
 import { useSettingsNavigation } from "./use-settings-navigation";
 import { useSettingsPageRouting } from "./use-settings-page-routing";
-import { desktopPageTitle, type SettingsPageId } from "./settings-page-registry";
+import type { SettingsPageId } from "./settings-page-registry";
 import { settingsPageProjections } from "./settings-page-projections";
 import { mobileHiddenPageIds, settingsPageModelVisibility } from "./settings-page-model-visibility";
 import { settingsInputPreferences } from "./settings-input-preferences";
@@ -56,6 +56,7 @@ import { defaultTouchKeyboardSchemes } from "./touch-keyboard-scheme-helpers";
 import { communityDestinationView } from "../community/community-destination";
 import { describeInstallerTrust } from "./update-manifest";
 import { editionUsesHelpcode } from "./input-scheme-options";
+import { useSettingsIntroTabs } from "./use-settings-intro-tabs";
 
 export type SettingsPageProps = {
   client: SettingsClient;
@@ -68,6 +69,7 @@ export type SettingsPageProps = {
 
 /** 设置窗口的状态、副作用和处理器；外壳与各设置页面消费同一份模型。 */
 export function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps) {
+  const { introTabs, selectIntroTab } = useSettingsIntroTabs();
   useEffect(() => {
     const automatic = () => {
       void client.dictionary?.updates?.("automatic").catch(() => undefined);
@@ -215,6 +217,8 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     setDictionaryTab,
     aboutTab,
     setAboutTab,
+    aiTab,
+    setAiTab,
     accountLoginReturnPage,
     setAccountLoginReturnPage,
     mobileLastPageByTab,
@@ -395,6 +399,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
   } = useUpdateCheck({
     checkUpdate: client.checkUpdate,
     checkForApplicationUpdate: client.checkForApplicationUpdate,
+    pendingUpdateCheck: client.pendingUpdateCheck,
     platform: client.host?.platform ?? null,
     edition: client.host?.edition?.id,
     arch: client.host?.arch,
@@ -603,7 +608,6 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     hasMcp: Boolean(client.mcpServerStatus),
     mobileHiddenPageIds,
     mobilePageTitle,
-    desktopPageTitle,
   });
   const {
     mobileActiveTab,
@@ -659,6 +663,8 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     initialMine: initialCommunityMine,
   } = communityDestinationView(communityDestination);
   return {
+    introTabs,
+    selectIntroTab,
     client,
     confirmation,
     confirm,
@@ -770,6 +776,8 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     setDictionaryTab,
     aboutTab,
     setAboutTab,
+    aiTab,
+    setAiTab,
     accountLoginReturnPage,
     settingsContentRef,
     communityDestination,

@@ -949,6 +949,7 @@ fn macos_single_instance_admits_only_settings_launches() {
         SurfaceRoute::Clipboard,
         SurfaceRoute::CloudClipboard,
         SurfaceRoute::CloudDictionary,
+        SurfaceRoute::Vocabulary,
     ] {
         assert!(!super::macos_settings_launch(Some(route)), "{route:?}");
     }
@@ -1317,7 +1318,7 @@ fn every_opened_panel_label_can_be_closed() {
     ] {
         assert!(closable.contains(&label), "{label}");
     }
-    // Every open_*_panel command opens a route's panel or the vocabulary panel, on whichever host it runs.
+    // Every open_*_panel command opens a route's panel, on whichever host it runs.
     for platform in [
         HostPlatform::Linux,
         HostPlatform::Macos,
@@ -1330,8 +1331,6 @@ fn every_opened_panel_label_can_be_closed() {
             assert!(closable.contains(&surface.label), "{}", surface.label);
         }
     }
-    let vocabulary = crate::panel_window::VOCABULARY_PANEL.label;
-    assert!(closable.contains(&vocabulary), "{vocabulary}");
 }
 #[test]
 fn toolbar_stylesheet_command_errors_do_not_expose_paths() {
@@ -1448,6 +1447,67 @@ fn scanning_missing_skin_directory_does_not_create_it() {
     assert!(!root.exists());
 }
 
+#[test]
+fn a_drafted_candidate_skin_installs_into_the_host_skin_root() {
+    // 1×1 的合成 PNG。
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==";
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("skins");
+    let runtime = super::RuntimeOptionsState {
+        path: None,
+        document: std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null)),
+        skins: Some(root.clone()),
+    };
+    let draft = |name: &str| {
+        super::candidate_skin_draft(
+            "drafted".into(),
+            format!(
+                "schema_version = 1\nid = 'drafted'\nname = '{name}'\nversion = '1.0'\nbase = 'system'\npreview = 'preview.png'\n[supports]\nlayouts = ['horizontal']\nthemes = ['light']\n[candidate_window]\nmin_width_dip = 0\n"
+            ),
+            std::collections::BTreeMap::from([("preview.png".into(), PNG.into())]),
+        )
+    };
+    let created =
+        super::create_candidate_skin_at(root.clone(), &runtime, &draft("草稿"), false).unwrap();
+    assert_eq!(created.id, "drafted");
+    assert!(!created.replaced);
+    let catalog = super::read_skin_catalog(root.clone()).catalog;
+    assert_eq!(catalog.packages.len(), 1);
+    assert_eq!(catalog.packages[0].name, "草稿");
+    // 同名皮肤只在页面确认覆盖后才替换。
+    assert_eq!(
+        super::create_candidate_skin_at(root.clone(), &runtime, &draft("第二版"), false)
+            .unwrap_err()
+            .code,
+        "candidate_skin_exists"
+    );
+    assert!(
+        super::create_candidate_skin_at(root.clone(), &runtime, &draft("第二版"), true)
+            .unwrap()
+            .replaced
+    );
+    assert_eq!(
+        super::read_skin_catalog(root).catalog.packages[0].name,
+        "第二版"
+    );
+}
+
+// `ShowItems` 的参数按 GVariant 文本格式书写：百分号编码后仍可能出现的单引号和反斜杠都要转义，否则 gdbus 会把路径截断或拒绝整个调用。
+#[cfg(any(target_os = "linux", test))]
+#[test]
+fn file_manager_show_items_argument_is_a_quoted_gvariant_array() {
+    assert_eq!(
+        super::file_manager_show_items_argument(
+            "file:///home/user/.config/msime-client/diagnostic.log"
+        ),
+        "['file:///home/user/.config/msime-client/diagnostic.log']"
+    );
+    assert_eq!(
+        super::file_manager_show_items_argument("file:///home/o'neil/a\\b/diagnostic.log"),
+        "['file:///home/o\\'neil/a\\\\b/diagnostic.log']"
+    );
+}
+
 // The diagnostic-log action takes no path from the webview: it resolves from the host's preferences directory alone, selects the file in Finder once the input method has written it, and falls back to the directory before that.
 #[test]
 fn diagnostic_log_target_resolves_from_the_host_directory() {
@@ -1459,12 +1519,12 @@ fn diagnostic_log_target_resolves_from_the_host_directory() {
         super::DiagnosticLogTarget::Directory(directory.clone())
     );
     std::fs::write(directory.join("diagnostic.log"), "focus_in\n").unwrap();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     assert_eq!(
         super::diagnostic_log_target(&directory),
         super::DiagnosticLogTarget::File(directory.join("diagnostic.log"))
     );
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     assert_eq!(
         super::diagnostic_log_target(&directory),
         super::DiagnosticLogTarget::Directory(directory.clone())
@@ -1480,13 +1540,17 @@ fn diagnostic_log_target_resolves_from_the_host_directory() {
 
 #[cfg(target_os = "linux")]
 use super::*;
+// 宿主读的上限挪进了共享层，与 MCP 服务共用。
+#[cfg(target_os = "linux")]
+use msime_client_services::skin::linux_runtime_options::LINUX_RUNTIME_OPTIONS_LIMIT;
 // The panel helpers these cover live in `panel_input` since the delivery code
 // moved out of the crate root; `use super::*` no longer reaches them.
 #[cfg(target_os = "linux")]
 use super::panel_input::{
-    focused_sway_container, ime_key_request, panel_text_requires_clipboard, parse_ime_reply,
-    parse_xdotool_geometry, sway_rect_for_container, sway_workspace_for_container,
-    x11_window_is_owned_by_process, ImeReply,
+    focused_sway_container, ime_key_request, linux_panel_placement, panel_anchor,
+    panel_text_requires_clipboard, parse_ime_reply, parse_xdotool_geometry, place_in_work_area,
+    sway_rect_for_container, sway_workspace_for_container, x11_window_is_owned_by_process,
+    ImeReply, LinuxPanelPlacement,
 };
 
 #[cfg(target_os = "linux")]
@@ -1550,6 +1614,218 @@ fn linux_input_method_key_request_names_the_keysym_and_evdev_code() {
             "op": "key", "key": "BackSpace", "keycode": 14, "shift": false,
             "control": false, "alt": false, "super": false,
         }))
+    );
+}
+
+// 剪贴板面板的状态行按这一轮的结果说话：偏好读不出、历史关闭、剪贴板读不到、保存失败各有一句，其余都是正常采集。
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_clipboard_capture_status_names_each_round() {
+    use super::clipboard_history::{
+        clipboard_capture_round, clipboard_without_text, ClipboardCaptureState,
+        ClipboardCaptureStatus,
+    };
+    let text = Ok(Some("synthetic".to_owned()));
+    let unreadable = Err(HostActionError {
+        code: "unavailable",
+    });
+    assert_eq!(
+        clipboard_capture_round(false, false, &Ok(None), None),
+        ClipboardCaptureStatus::Unavailable
+    );
+    assert_eq!(
+        clipboard_capture_round(true, false, &Ok(None), None),
+        ClipboardCaptureStatus::Disabled
+    );
+    assert_eq!(
+        clipboard_capture_round(true, true, &unreadable, None),
+        ClipboardCaptureStatus::ReadUnavailable
+    );
+    assert_eq!(
+        clipboard_capture_round(true, true, &text, Some(false)),
+        ClipboardCaptureStatus::SaveFailed
+    );
+    assert_eq!(
+        clipboard_capture_round(true, true, &text, None),
+        ClipboardCaptureStatus::Monitoring
+    );
+    // 保密内容（`Ok(None)`）不保存，但采集本身是正常的。
+    assert_eq!(
+        clipboard_capture_round(true, true, &Ok(None), None),
+        ClipboardCaptureStatus::Monitoring
+    );
+    // 装了读取程序、剪贴板却是空的或只有图片时，wl-paste、xclip 都以非零状态退出；这不是读不了剪贴板，状态行不能提示去装已经装好的工具。
+    assert_eq!(
+        clipboard_capture_round(true, true, &clipboard_without_text(true), None),
+        ClipboardCaptureStatus::Monitoring
+    );
+    assert_eq!(
+        clipboard_capture_round(true, true, &clipboard_without_text(false), None),
+        ClipboardCaptureStatus::ReadUnavailable
+    );
+    let state = ClipboardCaptureState::default();
+    assert_eq!(state.current(), None);
+    assert!(state.update(ClipboardCaptureStatus::Monitoring));
+    assert!(!state.update(ClipboardCaptureStatus::Monitoring));
+    assert!(state.update(ClipboardCaptureStatus::ReadUnavailable));
+    assert_eq!(
+        state.current(),
+        Some(ClipboardCaptureStatus::ReadUnavailable)
+    );
+    assert_eq!(
+        serde_json::to_value(ClipboardCaptureStatus::ReadUnavailable).unwrap(),
+        serde_json::json!("read_unavailable")
+    );
+    assert!(state.update(ClipboardCaptureStatus::ReadUnavailableX11));
+    assert_eq!(
+        state.current(),
+        Some(ClipboardCaptureStatus::ReadUnavailableX11)
+    );
+    assert!(state.update(ClipboardCaptureStatus::ReadUnavailableWayland));
+    assert_eq!(
+        state.current(),
+        Some(ClipboardCaptureStatus::ReadUnavailableWayland)
+    );
+    assert_eq!(
+        serde_json::to_value(ClipboardCaptureStatus::ReadUnavailableX11).unwrap(),
+        serde_json::json!("read_unavailable_x11")
+    );
+    assert_eq!(
+        serde_json::to_value(ClipboardCaptureStatus::ReadUnavailableWayland).unwrap(),
+        serde_json::json!("read_unavailable_wayland")
+    );
+}
+
+// 设置程序自己读不到剪贴板时，状态行先看剪贴板用户服务：默认的 Ubuntu GNOME 没装 xclip、wl-clipboard，服务用随包的原生读取照常采集，不能说采集已暂停。服务没在运行时才按会话提示该装什么。
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_clipboard_unreadable_status_follows_the_capture_service_and_the_session() {
+    use super::clipboard_history::{unreadable_clipboard_status, ClipboardCaptureStatus};
+    // 服务在运行：不管会话是什么都在正常采集。
+    for (x11, wayland, wl_paste) in [
+        (true, true, false),
+        (false, true, true),
+        (false, false, false),
+    ] {
+        assert_eq!(
+            unreadable_clipboard_status(true, x11, wayland, wl_paste),
+            ClipboardCaptureStatus::Monitoring
+        );
+    }
+    // GNOME Wayland（有 XWayland）：wl-paste 用不上，提示 xclip 或 xsel，不提示 wl-clipboard。
+    assert_eq!(
+        unreadable_clipboard_status(false, true, true, true),
+        ClipboardCaptureStatus::ReadUnavailableX11
+    );
+    assert_eq!(
+        unreadable_clipboard_status(false, true, false, false),
+        ClipboardCaptureStatus::ReadUnavailableX11
+    );
+    // 只有 Wayland、没装 wl-paste：提示 wl-clipboard。
+    assert_eq!(
+        unreadable_clipboard_status(false, false, true, false),
+        ClipboardCaptureStatus::ReadUnavailableWayland
+    );
+    // 只有 Wayland、装了 wl-paste 仍读不到（合成器不提供 data-control），或没有显示：装什么都没用。
+    assert_eq!(
+        unreadable_clipboard_status(false, false, true, true),
+        ClipboardCaptureStatus::ReadUnavailable
+    );
+    assert_eq!(
+        unreadable_clipboard_status(false, false, false, false),
+        ClipboardCaptureStatus::ReadUnavailable
+    );
+}
+
+// 与 macOS 一致：屏幕键盘贴着工作区底部居中，表情和本地剪贴板面板在工作区居中，其余面板仍在输入窗口下方。
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_panels_take_the_macos_placement() {
+    assert_eq!(
+        linux_panel_placement("keyboard-panel"),
+        LinuxPanelPlacement::BottomCenter
+    );
+    assert_eq!(
+        linux_panel_placement("emoji-panel"),
+        LinuxPanelPlacement::Center
+    );
+    assert_eq!(
+        linux_panel_placement("clipboard-panel"),
+        LinuxPanelPlacement::Center
+    );
+    for label in ["handwriting-panel", "voice-panel", "cloud-clipboard-panel"] {
+        assert_eq!(
+            linux_panel_placement(label),
+            LinuxPanelPlacement::BelowTarget
+        );
+    }
+    let area = (1920.0, 32.0, 1280.0, 768.0);
+    assert_eq!(
+        place_in_work_area(area, 1100.0, 400.0, LinuxPanelPlacement::BottomCenter),
+        (2010.0, 400.0)
+    );
+    assert_eq!(
+        place_in_work_area(area, 720.0, 720.0, LinuxPanelPlacement::Center),
+        (2200.0, 56.0)
+    );
+    // 面板比工作区还大时贴住工作区起点，不越到上一块显示器。
+    assert_eq!(
+        place_in_work_area(
+            (0.0, 0.0, 800.0, 600.0),
+            1100.0,
+            720.0,
+            LinuxPanelPlacement::BottomCenter
+        ),
+        (0.0, 0.0)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_panel_anchor_follows_the_target_or_its_work_area() {
+    let editor = (100.0, 50.0, 1600.0, 1000.0);
+    let workspace = Some((0.0, 0.0, 1920.0, 1080.0));
+    // 跟随输入窗口的面板：窗口下方 16 像素，夹在工作区里。
+    assert_eq!(
+        panel_anchor(
+            editor,
+            workspace,
+            620.0,
+            520.0,
+            LinuxPanelPlacement::BelowTarget
+        ),
+        (590.0, 560.0)
+    );
+    assert_eq!(
+        panel_anchor(editor, None, 620.0, 520.0, LinuxPanelPlacement::BelowTarget),
+        (590.0, 1066.0)
+    );
+    // 已知工作区（Sway）时直接摆放。
+    assert_eq!(
+        panel_anchor(
+            editor,
+            workspace,
+            1100.0,
+            400.0,
+            LinuxPanelPlacement::BottomCenter
+        ),
+        (410.0, 680.0)
+    );
+    // 工作区未知（X11）时返回窗口中线上的锚点，由显示器信息完成摆放。
+    assert_eq!(
+        panel_anchor(editor, None, 720.0, 720.0, LinuxPanelPlacement::Center),
+        (540.0, 550.0)
+    );
+    // 宽高为零或不是有限数的工作区不算数。
+    assert_eq!(
+        panel_anchor(
+            editor,
+            Some((0.0, 0.0, 0.0, 1080.0)),
+            720.0,
+            720.0,
+            LinuxPanelPlacement::Center
+        ),
+        (540.0, 550.0)
     );
 }
 
@@ -1912,50 +2188,6 @@ fn runtime_options_sync_publishes_the_installed_skin_catalog() {
         &msime_client_services::skin::catalog::SkinCatalog::default(),
     )
     .unwrap();
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn runtime_options_skin_catalog_stays_within_what_the_hosts_read() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let skins = directory.path().join("skins");
-    for index in 0..40 {
-        write_candidate_skin(
-            &skins,
-            &format!("skin{index:02}"),
-            &format!("皮肤 {index:02}"),
-        );
-    }
-    let catalog = msime_client_services::skin::catalog::scan(&skins);
-    let mut preferences = serde_json::to_value(Preferences::default()).unwrap();
-    // The last package by name: beyond the package cap and the first to go when trimming, were the selection not protected in both.
-    preferences["custom_theme"]["candidate_skin"] = "skin39".into();
-    // 深色槽位的皮肤同样在上限之外，同样要留下。
-    preferences["custom_theme"]["candidate_skin_dark"] = "skin38".into();
-    let mut document = serde_json::json!({"api_version": 1, "preferences": preferences});
-    let bytes = runtime_options_with_skin_catalog(&mut document, &skins, &catalog).unwrap();
-    assert!(
-        bytes.len() <= LINUX_RUNTIME_OPTIONS_CATALOG_BUDGET,
-        "{}",
-        bytes.len()
-    );
-    let packages = document["candidate_skin_catalog"]["packages"]
-        .as_array()
-        .unwrap()
-        .clone();
-    assert!(
-        !packages.is_empty() && packages.len() < 32,
-        "{}",
-        packages.len()
-    );
-    assert!(packages.iter().any(|package| package["id"] == "skin39"));
-    assert!(packages.iter().any(|package| package["id"] == "skin38"));
-    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), document);
-
-    // A document already too large for the hosts is not made larger by the catalog.
-    let mut crowded = serde_json::json!({"preferences": {}, "padding": "x".repeat(LINUX_RUNTIME_OPTIONS_CATALOG_BUDGET)});
-    runtime_options_with_skin_catalog(&mut crowded, &skins, &catalog).unwrap();
-    assert!(crowded.get("candidate_skin_catalog").is_none());
 }
 
 /// About 440 KiB once decoded: a PNG signature followed by zeros, which the preference validation accepts as a screen-keyboard photo.

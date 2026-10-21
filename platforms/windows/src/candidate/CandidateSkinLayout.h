@@ -4,9 +4,9 @@
 #include <optional>
 
 namespace msime::windows {
-// 皮肤包 `[candidate_window]` 里的版式、外框、阴影、材质、翻页箭头和收紧宽度这几组键，来自共享 catalog 的 `SkinSummary`（`geometry` / `horizontal` / `vertical`、`borderWidthDip`、`itemCornerRadiusDip`、`shadow`、`backdrop`、`pageArrows`、`fitContent`），含义照 msime-windows c0a9d371 的 candidate_skin_tokens.cpp 与 candidate_skin_scene.cpp。没写的键为空，卡片保留宿主自己的值：不写这些键的皮肤和没有皮肤时，画出来与以前一样。这里不碰 JSON 和 Direct2D，换算规则在没有 Windows 的机器上也能测。
+// 皮肤包 `[candidate_window]` 里的版式、外框、阴影、材质、翻页箭头、收紧宽度和卷轴展开这几组键，来自共享 catalog 的 `SkinSummary`（`geometry` / `horizontal` / `vertical`、`borderWidthDip`、`itemCornerRadiusDip`、`shadow`、`backdrop`、`pageArrows`、`fitContent`、`expandPanel`、`expandRows`），含义照 msime-windows c0a9d371 的 candidate_skin_tokens.cpp 与 candidate_skin_scene.cpp。没写的键为空，卡片保留宿主自己的值：不写这些键的皮肤和没有皮肤时，画出来与以前一样。这里不碰 JSON 和 Direct2D，换算规则在没有 Windows 的机器上也能测。
 //
-// msime-windows 里没写的键沿用 `base` 外观自己的出厂清单（例如 `wechat` 的 `padding = 2`）；共享 catalog 目前只按外观补颜色和卡片圆角，不补版式，所以这里没写的键回到的是本宿主的默认版式，而不是 `base` 外观的。
+// msime-windows 里没写的键沿用 `base` 外观自己的出厂清单（例如 `wechat` 的 `padding = 2`）；有 Windows 外观基底或 canvas 基底的包，共享 catalog 给的 `resolvedLayout` 就是这份出厂版式叠上包自己写的键（见 `shared`）。只有不带 `resolvedLayout` 的包，没写的键才回到本宿主的默认版式。
 
 // 版式长度：固定 DIP，或按候选字号缩放的 em。em 换算后取整，同 msime-windows 的 CandidateSkinCatalog::ResolveLength。
 struct CandidateSkinLength {
@@ -40,7 +40,14 @@ struct CandidateSkinLayout {
   std::optional<CandidateSkinShadow> shadow;
   // msime-windows 里没写等于 `none`。
   CandidateSkinBackdrop backdrop = CandidateSkinBackdrop::none;
+  // 包有九宫格面板（`border_image`，只在 `base = "canvas"` 时有）。面板盖住整张卡片，msime-windows 这时不垫系统材质（CandidateBackdrop.h）。
+  bool panel_image = false;
   std::optional<bool> page_arrows, fit_content;
+  // 包带着共享层合并好的版式（catalog 的 `resolvedLayout`：Windows 外观基底和 canvas 的出厂清单叠上包自己的声明）。和 macOS 一样，带着它的卡片用 msime-windows 固定的 160 DIP 最小宽度，没有它的原生主题用 7em。
+  bool shared = false;
+  // `expand_panel`（横排的卷轴展开）与 `expand_rows`（展开后一屏的网格行数，2-8），见 CandidateExpandPanel.h。
+  std::optional<bool> expand_panel;
+  std::optional<int> expand_rows;
 };
 // 当前排列下生效的版式表：横排或竖排表里写了的键盖过共享表，同 msime-windows 的 ApplyLayer 先套 geometry 再套排列表。
 inline CandidateSkinGeometry candidate_skin_geometry(const CandidateSkinLayout &layout,
@@ -76,8 +83,15 @@ struct CandidateSkinMetrics {
       selected_bar_width, selected_bar_height;
   bool selected_bar_inside = false, corners_follow_card = false,
        justify_rows = false, page_arrows = false, fit_content = false;
+  // CandidateSkinLayout::shared：版式来自共享层合并好的出厂清单，最小宽度用 160 DIP。
+  bool shared_layout = false;
+  // 卷轴展开只在横排生效（msime-windows 的 ResolveExpandPanel 只在横排时问）；打开时 page_arrows 被忽略。expand_rows 没写时是 4。
+  bool expand_panel = false;
+  int expand_rows = 4;
   CandidatePageArrowStyle page_arrow_style = CandidatePageArrowStyle::chevron;
   CandidateSkinInsets preedit_margin{};
+  // 调色板的 `show_selected_bar`（主题或皮肤包打开了选中竖条）。不是版式键，由窗口按当前调色板填上：缺省版式和 macOS 的 MSIMECandidateTextLeft(showSelectedBar) 一样，有竖条时序号多让出 6 DIP。
+  bool show_selected_bar = false;
 };
 inline CandidateSkinMetrics candidate_skin_metrics(const CandidateSkinLayout &layout,
                                                    bool horizontal,
@@ -109,6 +123,11 @@ inline CandidateSkinMetrics candidate_skin_metrics(const CandidateSkinLayout &la
   metrics.preedit_margin = geometry.preedit_margin.value_or(CandidateSkinInsets{});
   metrics.page_arrows = layout.page_arrows.value_or(false);
   metrics.fit_content = layout.fit_content.value_or(false);
+  metrics.shared_layout = layout.shared;
+  metrics.expand_panel = horizontal && layout.expand_panel.value_or(false);
+  metrics.expand_rows = std::clamp(layout.expand_rows.value_or(4), 2, 8);
+  if (metrics.expand_panel)
+    metrics.page_arrows = false;
   return metrics;
 }
 // 卡片阴影的不透明度。皮肤的档位只缩放阴影的不透明度、不改几何（msime-windows 的 ShadowAlphaScale：soft 乘 0.5，strong 乘 1.6），`none` 不画；没写时是宿主自己的 `alpha`。Windows 上没有阴影的用户偏好，皮肤直接决定。
@@ -126,7 +145,7 @@ inline float candidate_skin_shadow_alpha(std::optional<CandidateSkinShadow> shad
   }
   return alpha;
 }
-// 卡片底色的不透明度。本宿主还没有系统材质（亚克力、云母要 Windows.UI.Composition 的模糊背景，这里的候选窗只有 DirectComposition 交换链），所以要材质的皮肤按 msime-windows 在系统关闭透明效果或不支持时的做法画：`surface` 补成不透明，免得为材质准备的半透明底色直接透出后面的窗口。用户的候选窗不透明度之后照常作用在它上面。
+// 要材质的皮肤在材质画不出来时（系统关闭透明效果、高对比度、建不起合成）卡片底色的不透明度：按 msime-windows 的回退把 `surface` 补成不透明，免得为材质准备的半透明底色直接透出后面的窗口。垫上材质时卡片不画底色，由 CandidateBackdrop.h 的 candidate_backdrop_surface_alpha 决定。用户的候选窗不透明度之后照常作用在它上面。
 inline float candidate_skin_surface_alpha(CandidateSkinBackdrop backdrop,
                                           float alpha) {
   return backdrop == CandidateSkinBackdrop::none ? alpha : 1.0f;

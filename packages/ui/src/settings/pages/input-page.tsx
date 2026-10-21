@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useSettingsTabs } from "../use-settings-tabs";
 import { NavigationSection } from "../navigation-section";
-import { defaultNavigation, pagingPreferencesPatch } from "../candidate-paging-preferences";
+import { navigationWithDefaults, pagingPreferencesPatch } from "../candidate-paging-preferences";
 import { useSettingsForm } from "../settings-form-context";
 import { GroupList, Row } from "../../core/platform-controls";
 import { InputSchemeSettingsContent } from "../input-scheme-settings-content";
@@ -124,7 +124,7 @@ export function InputSettingsPage() {
   const { onPreferencesChange, onVoiceChange } = createSettingsDraftActions({ setDraft });
   const { onChange: onHelpcodeChange } = createHelpcodeSettingsActions({ setDraft });
   const helpcodeImport = useHelpcodeImport(client.plugins, setDraft, refreshHelpcodePacks);
-  const navigation = draft.navigation ?? defaultNavigation;
+  const navigation = navigationWithDefaults(draft.navigation);
   // 升级后补齐已保存偏好需要的资源包由宿主在启动时完成，这里挂载时不自动下载，只在用户选用方案、打开桌面神经联想或点「下载」时下载。提供哪些资源包由宿主的列表决定：日文和语言词库只有 macOS 列出。
   const resourcePacks = useResourcePacks(client.resourcePacks, {
     value: draft.voice_input?.asr_model_mirror ?? "",
@@ -136,7 +136,7 @@ export function InputSettingsPage() {
   const temporaryJapanese = host?.edition?.temporary_japanese ?? true;
   // 不带键盘神经模型的版本（host-api 也始终把它关掉）在触屏宿主上不列出神经联想开关。
   const neuralKeyboard = host?.edition?.neural_keyboard ?? true;
-  // 应用例外只在认得前台应用的宿主上提供（macOS 按 bundle id，Windows 按进程基名）。
+  // 应用例外只在认得前台应用的宿主上提供（macOS 按 bundle id，Windows 按进程基名，Linux 按输入法框架报告的程序名）。
   const showAppInputModeRules = host?.app_input_mode_rules === true;
   // HarmonyOS 手机像 Android 的 `TypingPage` 一样画设计稿的 输入 页：语言与方案、中文、辅助码 和 翻译 直接可见，其余都放进末尾的 更多 折叠区。翻页键在它的 外接键盘快捷键 页，整句联想 在它的 表达 页，所以这里不画。
   const harmonyPhone = harmonyPlatform && mobilePlatform;
@@ -222,6 +222,7 @@ export function InputSettingsPage() {
             touchKeyboardSchemes={touchKeyboardSchemes}
             selectedTouchKeyboardScheme={selectedTouchKeyboardScheme}
             macos={macosPlatform}
+            linux={linuxPlatform}
             inputSchemes={supportedInputSchemes(host)}
             edition={host?.edition}
             // 共享偏好里还没有这一项时，macOS 显示本机 defaults 里的旧选择，与输入法实际的行为一致；其他宿主按关显示。
@@ -369,9 +370,13 @@ export function InputSettingsPage() {
             <AppInputModeRulesSection
               value={draft.app_input_mode_rules}
               windows={host?.platform === "windows"}
-              pickApplication={client.pickApplication}
-              // Windows 的规则就是程序文件名，名称没有更多信息，宿主也不提供查询。
-              applicationNames={host?.platform === "windows" ? undefined : client.applicationNames}
+              linux={linuxPlatform}
+              // Linux 没有选应用的对话框，程序名手填。
+              pickApplication={linuxPlatform ? undefined : client.pickApplication}
+              // Windows 和 Linux 的规则就是程序名，名称没有更多信息，宿主也不提供查询。
+              applicationNames={
+                host?.platform === "windows" || linuxPlatform ? undefined : client.applicationNames
+              }
               onChange={(app_input_mode_rules) => onPreferencesChange({ app_input_mode_rules })}
             />
           )

@@ -84,7 +84,7 @@ export const copyId =
 
 export const modalBackdrop = "fixed inset-0 z-20 grid place-items-center bg-black/42 p-5";
 export const modal =
-  "flex max-h-[min(720px,90vh)] w-[min(520px,100%)] flex-col gap-3.5 overflow-auto rounded-2xl border border-edge bg-[var(--dropdown-bg)] p-[22px] text-body shadow-[0_18px_60px_rgb(0_0_0/25%)]";
+  "settings-modal-surface flex max-h-[min(720px,90vh)] w-[min(520px,100%)] flex-col gap-3.5 overflow-auto rounded-2xl border border-edge bg-[var(--dropdown-bg)] p-[22px] text-body shadow-[0_18px_60px_rgb(0_0_0/25%)]";
 export const modalHeading = "flex items-center justify-between gap-3 [&>h2]:m-0";
 
 /** Two columns of facts, one on a phone where a value would otherwise be squeezed to a few glyphs. */
@@ -188,7 +188,7 @@ export const profileConfirmation = "[&>div]:m-0";
 export const sheetScrim =
   "fixed inset-0 z-50 animate-ms-fade-in bg-[rgba(0,0,0,0.35)] motion-reduce:animate-none";
 export const sheet =
-  "fixed inset-x-0 bottom-0 z-50 flex max-h-[92vh] flex-col gap-3 overflow-y-auto overscroll-contain rounded-t-[20px] bg-[var(--p-bg)] px-5 pt-2 pb-[calc(34px+env(safe-area-inset-bottom))] [font-family:var(--p-font,inherit)] [color:var(--p-text)] animate-ms-sheet-up motion-reduce:animate-none";
+  "settings-modal-surface fixed inset-x-0 bottom-0 z-50 flex max-h-[92vh] flex-col gap-3 overflow-y-auto overscroll-contain rounded-t-[20px] bg-[var(--p-bg)] px-5 pt-2 pb-[calc(34px+env(safe-area-inset-bottom))] [font-family:var(--p-font,inherit)] [color:var(--p-text)] animate-ms-sheet-up motion-reduce:animate-none";
 export const sheetGrabber = "mx-auto h-[5px] w-9 shrink-0 rounded-full bg-[var(--p-hair)]";
 export const sheetHeader = "flex items-start gap-3 pt-2";
 export const sheetHeading = "flex min-w-0 flex-1 flex-col gap-1.5";

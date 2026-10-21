@@ -17,7 +17,7 @@ ArkTS 宿主与 NAPI 原生边界是完整实现：键盘扩展、设置应用�
 
 官方提供的共享方式是「共享沙箱」：签名 Profile 和键盘扩展 `module.json5` 的 `dataGroupIds` 登记同一个 data-group-id，两个进程用 `context.getGroupDir(id)` 拿到同一个目录；基础访问模式下键盘对它只读，完整体验模式下可读写。本宿主的 ID 是 AppGallery Connect 签发的 `group.1516753898738609107`（代码里在 `keyboard/SharedStateMirror.ets` 的 `DATA_GROUP_ID`）。签名 Profile 必须在 AGC 网页端「证书、APP ID和Profile › Profile › 新增」手动新建，DevEco 自动签名不会写入这项授权；新建后用 `strings <profile>.p7b | grep data-group-ids` 确认带着这个 ID。模拟器不做这项授权校验，只能在真机上验证。
 
-两个进程并不直接共用共享目录，而是各自保留私有的 `files/state`，经共享目录镜像对方要看到的那部分：设置应用改完设置后把偏好、按键反馈、应用主题、统计开关、皮肤、插件、社区回复库（完整体验模式下还有账号会话）发布到 `<共享目录>/msime/settings/`，键盘在启动和每次获得焦点时导入；完整体验模式下键盘把它改的偏好、刷新过的会话和打字统计发布到 `<共享目录>/msime/keyboard/`，设置窗口回到前台时导入。不直接共用的原因、条目表和冲突规则见 `.agents/notes/implemented/architecture/2026-10-09-harmony-ime-shared-sandbox.md`。基础访问模式下是单向的：键盘工具栏里改的设置会被设置应用下次的改动覆盖，统计计数和登录会话不交换。
+两个进程并不直接共用共享目录，而是各自保留私有的 `files/state`，经共享目录镜像对方要看到的那部分：设置应用改完设置后把偏好、按键反馈、应用主题、统计开关、皮肤、插件、社区回复库（完整体验模式下还有账号会话）发布到 `<共享目录>/msime/settings/`，键盘在启动和每次获得焦点时导入；完整体验模式下键盘把它改的偏好、刷新过的会话和打字统计发布到 `<共享目录>/msime/keyboard/`，设置窗口回到前台时导入。正在用的皮肤包被同名替换（重装图库作品、皮肤编辑器覆盖保存）时偏好修订号不变，键盘在获得焦点、导入完之后比较选中包的目录、`skin.toml` 和画出的装饰图、背景图的 inode、修改时间和大小，变了就重新应用外观，不必重启键盘（`tests/candidate-skin-package-identity.test.ts`）。不直接共用的原因、条目表和冲突规则见 `.agents/notes/implemented/architecture/2026-10-09-harmony-ime-shared-sandbox.md`。基础访问模式下是单向的：键盘工具栏里改的设置会被设置应用下次的改动覆盖，统计计数和登录会话不交换。
 
 OpenHarmony 适配保留 ArkTS/ArkUI 应用入口与 NAPI 原生边界。共享输入算法、组合状态、配置校验和资源准备继续由 Rust Host API 与 Rust Engine（`crates/engine`）提供；`platforms/harmony/native/client_napi.cpp` 只负责 NAPI 注册和 C ABI 转发，不复制候选分页或输入状态机。
 
@@ -609,3 +609,7 @@ bash platforms/harmony/tests/run.sh
 ```
 
 该命令编译并运行 `tests/keyboard-logic.test.ts`，CI 的 `ci-platforms.yml` harmonyos job 跑的就是这条。三道门禁各自回答不同的问题，互相替代不了：`tests/run.sh` 覆盖纯逻辑，`build-native.sh` 覆盖指定 OpenHarmony NDK 下的 Rust/C++/NAPI 交叉构建与 ELF 导出检查，`hvigorw assembleHap` 覆盖 ArkTS 编译与 HAP 打包。设备侧的系统输入法注册、焦点与编辑器接管、面板生命周期见上面的「模拟器验证」两节。
+
+## Canvas 候选皮肤
+
+`base = "canvas"` 的候选包由共享 Rust 校验，普通候选条、展开网格及九键中栏使用 Image Kit 解码和原生 Canvas 绘制九宫格与自由挂件。触屏固定高度时等比缩小留白，2in1 的原生面板尺寸包含留白与预编辑行距。面板成功绘制后才启用贴图配色，失败保留可读回退。GIF/WebP/APNG 的动画取决于设备 Image Kit 实际提供的帧，不能提供时尝试静态图；HAP 编译通过不能代替动画与输入法设备验收。设计边界与验证记录见[决策笔记](../../.agents/notes/implemented/feature/2026-10-19-harmony-candidate-canvas.md)。

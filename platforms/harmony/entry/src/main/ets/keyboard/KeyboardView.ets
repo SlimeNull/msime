@@ -1,3 +1,4 @@
+import { CandidateCanvasFrame } from './candidate/CandidateCanvasFrame';
 import {
   KeyboardSession, KeyboardPreferences, KeyboardState, CandidateEntry, ExpandedCandidate,
   EmojiPage, EmojiRow, ClipboardHistoryMutation
@@ -48,7 +49,7 @@ import { CandidateDecorationLayout, CandidateDecorationRect } from './candidate/
 import { PreeditCaretPolicy } from './candidate/PreeditCaretPolicy';
 import { CandidatePreeditStylePolicy, VisibleComposition } from './candidate/CandidatePreeditStylePolicy';
 import { CandidateTranslationStyle } from './candidate/CandidateTranslationStyle';
-import { CandidateSkinPolicy } from './candidate/CandidateSkinPolicy';
+import { CandidateLayoutPolicy, CandidateSkinGeometry, CandidateSkinPolicy } from './candidate/CandidateSkinPolicy';
 import { CandidateWheelPolicy } from './candidate/CandidateWheelPolicy';
 import { KeyboardMetrics } from './KeyboardMetrics';
 import {
@@ -84,6 +85,10 @@ import {
   EmojiPanelKey, EmojiPanelKeyAction, EmojiPanelKeyDecision, EmojiPanelKeyPolicy
 } from './emoji/EmojiPanelKeyPolicy';
 import { EMOJI_TOOLTIP_DELAY_MS, CLIPBOARD_TOOLTIP_MAX_LINES, EmojiPanelTooltipPolicy } from './emoji/EmojiPanelTooltipPolicy';
+import {
+  MASCOT_STICKER_INSET_VP, MASCOT_STICKER_PANEL, MascotSticker, MascotStickerPolicy
+} from './emoji/MascotStickerPolicy';
+import { MascotStickerSource } from './emoji/MascotStickerStore';
 import { KeyboardLog, describeError } from './KeyboardLog';
 import { KeyboardFormFactor } from './KeyboardFormFactor';
 import { DesktopSurface } from './DesktopSurface';
@@ -401,6 +406,10 @@ const SYMBOL_MIN_FONT_SIZE: number = 8;
 const EMOJI_PANEL: string = 'emoji';
 const KAOMOJI_PANEL: string = 'kaomoji';
 const SYMBOLS_PANEL: string = 'symbols';
+// 随包的水杉娘表情包，读得到时排在所有页签最前、打开面板默认停在这一页（`MascotStickerPolicy.tabOrder` / `openingPanel`）；手机底栏上画第一张的缩略图而不是标题。
+const STICKER_PANEL: string = MASCOT_STICKER_PANEL;
+/** 底栏「水杉娘」页签缩略图四周的留白，让图不贴着选中态的圆角底色。 */
+const STICKER_TAB_INSET_VP: number = 2;
 // The Windows emoji panel's last page (`EmojiPanel::Page::Clipboard`). Only a 2in1 draws it as a tab: the phone reaches clipboard history from its own tools face.
 const CLIPBOARD_PANEL: string = 'clipboard';
 // The clipboard surface's two sections: this device's history, and the account's cloud clipboard.
@@ -437,7 +446,8 @@ interface EmojiPanelTab {
 const EMOJI_PANEL_TABS: EmojiPanelTab[] = [
   { id: EMOJI_PANEL, title: '表情' },
   { id: KAOMOJI_PANEL, title: '颜文字' },
-  { id: SYMBOLS_PANEL, title: '符号' }
+  { id: SYMBOLS_PANEL, title: '符号' },
+  { id: STICKER_PANEL, title: '水杉娘' }
 ];
 
 const DESKTOP_EMOJI_PANEL_TABS: EmojiPanelTab[] = EMOJI_PANEL_TABS.concat([
@@ -533,6 +543,12 @@ struct KeyboardView {
   @State emojiQuery: string = '';
   @State emojiSelected: number = 0;
   @State emojiResults: string[] = [];
+  /** 随包的水杉娘表情包，第一次打开表情面板时读入；包里没有时为空，也就没有这个页签。 */
+  @State mascotStickers: MascotSticker[] = [];
+  /** 贴纸网格扣掉左右内边距后的宽度，决定列数和格子边长；还没量出来时为 0。 */
+  @State mascotStickerGridWidth: number = 0;
+  // 贴纸网格的懒加载数据源，与 `mascotStickers` 同时设定一次，之后不再替换。
+  private mascotStickerSource: MascotStickerSource = new MascotStickerSource([]);
   private emojiGridScroller: Scroller = new Scroller();
   private symbolGridScroller: Scroller = new Scroller();
   private clipListScroller: Scroller = new Scroller();
@@ -833,8 +849,12 @@ struct KeyboardView {
       if (surface === DesktopSurface.EMOJI) {
         // A search is for one visit to the panel, as it is on Windows, where the box starts empty each time the panel is shown.
         this.resetEmojiSearch();
+        // 标签行要知道有没有「水杉娘」这一页。
+        this.loadMascotStickers();
         if (this.emojiItems.length === 0) {
           this.loadEmoji(this.emojiGroup);
+          // 第一次打开时默认选中「水杉娘」，之后与 Windows 的面板一样回到上次那一页；读不到表情包时停在表情页。
+          this.emojiPanel = MascotStickerPolicy.openingPanel(this.emojiPanel, this.mascotStickers.length > 0);
         }
       }
     };
@@ -1982,27 +2002,34 @@ struct KeyboardView {
   /** A hardware key offered to the open 2in1 panel; false leaves it to the editor. */
   private panelKey(key: EmojiPanelKey): boolean {
     const clipboard: boolean = this.emojiPanel === CLIPBOARD_PANEL;
+    const stickers: boolean = this.emojiPanel === STICKER_PANEL;
     const cloud: boolean = clipboard && this.cloudTabActive();
     const clips: string[] = !clipboard ? []
       : cloud ? this.visibleCloudClips().map((entry: CloudClipboardItem): string => entry.text)
         : this.visibleClips().map((entry: ClipboardHistoryItem): string => entry.text);
-    const items: string[] = clipboard ? [] : this.visibleEmojiItems();
+    const items: string[] = clipboard || stickers ? [] : this.visibleEmojiItems();
     const decision: EmojiPanelKeyDecision = EmojiPanelKeyPolicy.decide(key,
-      clipboard ? clips.length : items.length, clipboard ? 1 : EMOJI_COLUMNS, this.emojiSelected,
-      this.emojiQuery);
+      clipboard ? clips.length : stickers ? this.mascotStickers.length : items.length,
+      clipboard ? 1 : stickers ? MascotStickerPolicy.columns(this.mascotStickerGridWidth) : EMOJI_COLUMNS,
+      this.emojiSelected, this.emojiQuery);
     if (decision.action === EmojiPanelKeyAction.NONE) {
       return false;
     }
     if (decision.action === EmojiPanelKeyAction.CLOSE) {
       this.leaveSurface(DesktopSurface.EMOJI);
     } else if (decision.action === EmojiPanelKeyAction.SEARCH) {
-      this.searchEmoji(decision.query);
-      this.revealEmojiSelection(clipboard);
+      // 表情包不做搜索；键照样由面板收下，不落到面板后面的输入框里。
+      if (!stickers) {
+        this.searchEmoji(decision.query);
+        this.revealEmojiSelection(clipboard);
+      }
     } else if (decision.action === EmojiPanelKeyAction.ACTIVATE) {
       if (cloud) {
         this.insertCloudClip(clips[decision.index]);
       } else if (clipboard) {
         KeyboardSession.shared.insert(clips[decision.index]);
+      } else if (stickers) {
+        this.sendMascotSticker(this.mascotStickers[decision.index]);
       } else {
         this.selectEmoji(items[decision.index]);
       }
@@ -2023,8 +2050,18 @@ struct KeyboardView {
   }
 
   private showEmojiPanel(panel: string): void {
+    // 底栏和标签行都要知道有没有「水杉娘」这一页，所以无论打开哪一页都先读一次（读过就用缓存）。
+    this.loadMascotStickers();
+    if (panel === STICKER_PANEL && this.mascotStickers.length === 0) {
+      // 没跑 stage-resources.sh 打出的包里没有表情包，上次停在这一页时回到表情页。
+      this.showEmojiPanel(EMOJI_PANEL);
+      return;
+    }
     this.emojiPanel = panel;
     this.resetEmojiSearch();
+    if (panel === STICKER_PANEL) {
+      return;
+    }
     if (panel === CLIPBOARD_PANEL) {
       this.clips = this.clipboardEnabled ? KeyboardSession.shared.clipboardHistory() : [];
       this.clipboardNotice = this.clipboardEnabled ? '' : CLIPBOARD_HISTORY_OFF;
@@ -2067,6 +2104,31 @@ struct KeyboardView {
     }
   }
 
+  /** 读入随包的水杉娘表情包。`MascotStickerStore` 缓存读到的结果，读不到时缓存的是空表，所以每次打开面板调用它都不会重读文件。 */
+  private loadMascotStickers(): void {
+    if (this.mascotStickers.length > 0) {
+      return;
+    }
+    const stickers: MascotSticker[] = KeyboardSession.shared.mascotStickers.list();
+    if (stickers.length > 0) {
+      this.mascotStickerSource = new MascotStickerSource(stickers);
+      this.mascotStickers = stickers;
+    }
+  }
+
+  /**
+   * 点一张水杉娘：先按原样上屏正在拼写的内容（与打开表情面板时的 `commitRaw` 相同），再把这张图复制进系统剪贴板，并在候选栏提示怎么粘贴，或者为什么没复制成。输入法框架没有把图片交给输入框的接口，见 `MascotStickerStore`。不记入表情的最近使用。
+   */
+  private sendMascotSticker(sticker: MascotSticker): void {
+    if (KeyboardSession.shared.composing()) {
+      KeyboardSession.shared.commitRaw();
+    }
+    KeyboardSession.shared.mascotStickers.copy(sticker).then((notice: string): void => {
+      this.diagnostic = notice;
+      this.clearDiagnosticLater();
+    });
+  }
+
   private clearEmojiRecents(): void {
     if (KeyboardSession.shared.clearEmojiRecents()) {
       this.emojiRecents = [];
@@ -2085,7 +2147,9 @@ struct KeyboardView {
     if (this.surface === SURFACE_EMOJI) {
       // 最近使用标签位于每一页的底行，所以无论重新打开的是哪一页都会读取它们。
       this.emojiRecents = KeyboardSession.shared.emojiRecents();
-      this.showEmojiPanel(this.emojiPanel);
+      // 与 iOS 每次新建的表情面板一样，有水杉娘表情包时每次打开都直接显示它；读不到时照旧回到上次那一页。
+      this.loadMascotStickers();
+      this.showEmojiPanel(MascotStickerPolicy.openingPanel(this.emojiPanel, this.mascotStickers.length > 0));
     }
   }
 
@@ -3050,17 +3114,19 @@ struct KeyboardView {
       return '100%';
     }
     const padding: number = KeyboardMetrics.CANDIDATE_PADDING_VP;
-    // A desktop chip also carries its ordinal and its suffix, and the window is sized from the same estimate (CandidateWidthPolicy.rowWidthVp); counting the word alone made each chip narrower than what it draws.
+    // 桌面候选宽度与窗口估算保持一致，包含序号及其最小保留栏。
     const word: number = KeyboardFormFactor.isDesktop()
       ? CandidateWidthPolicy.chipContentVp(candidate, index, this.settings.candidateFontSize,
-        CandidateNumberFontPolicy.size(this.settings.candidateFontSize))
+        this.candidateNumberSize()) + (this.settings.candidateSkinLayout == null ? 0
+          : Math.max(0, 9 - (this.candidateNumberSize() > 0
+            ? CandidateWidthPolicy.textWidthVp(`${index + 1}`, this.candidateNumberSize()) : -CandidateWidthPolicy.ORDINAL_GAP_VP)))
       : TextPolicy.characters(candidate.text).length * this.settings.candidateFontSize;
     if (!KeyboardSession.shared.glossesExpected()) {
-      return CandidateChipWidth.chip(word, false, 0, padding);
+      return CandidateLayoutPolicy.chipWidth(this.candidateGeometry(), this.settings.candidateFontSize, word, padding);
     }
     const column: number = CandidateChipWidth.column(this.availableWidth, 0, padding);
     if (column <= 0) {
-      return CandidateChipWidth.chip(word, false, 0, padding);
+      return CandidateLayoutPolicy.chipWidth(this.candidateGeometry(), this.settings.candidateFontSize, word, padding);
     }
     return CandidateChipWidth.chip(word, true, column, padding);
   }
@@ -3170,13 +3236,31 @@ struct KeyboardView {
       this.settings.candidateEnglishFont, this.settings.candidateFallbackFonts);
   }
 
-  /**
-   * The candidate colours for the surface drawing them.
-   *
-   * The 2in1 candidate window wears the theme's candidate palette, resolved in the candidate window's own mode. The touch strip sits on the keyboard, so it wears the keyboard palette instead: the keyboard's text, its secondary colour for hints, and the accent for the selected candidate with no fill behind it.
-   */
+  @State private canvasReadySurfaces: string[] = [];
+  @State private canvasColorKey: string = '';
+  @State private canvasExpandedWidth: number = 0;
+  @State private canvasColors: CandidateColors | null = null;
+
+  private canvasReady(surface: string, key: string, ready: boolean): void {
+    const identity: string = `${surface}:${key}`;
+    this.canvasReadySurfaces = this.canvasReadySurfaces.filter((value: string): boolean => value !== identity);
+    if (ready && this.settings.candidateCanvas?.key === key) {
+      if (this.canvasColorKey !== key || this.canvasColors === null) {
+        this.canvasColors = KeyboardSession.shared.canvasCandidateColors(key);
+        this.canvasColorKey = key;
+      }
+      this.canvasReadySurfaces.push(identity);
+    }
+  }
+
+  /** 2in1 与 canvas 使用候选区配色；普通触屏条沿用键盘配色。 */
   private candidateColors(): CandidateColors {
-    if (KeyboardFormFactor.isDesktop()) {
+    const scene = this.settings.candidateCanvas;
+    if (scene !== null && this.canvasColorKey === scene.key && this.canvasColors !== null
+      && this.canvasReadySurfaces.some((value: string): boolean => value.endsWith(`:${scene.key}`))) {
+      return this.canvasColors;
+    }
+    if (KeyboardFormFactor.isDesktop() || scene !== null) {
       return this.settings.candidateColors;
     }
     const colors: CandidateColors = {
@@ -3200,11 +3284,12 @@ struct KeyboardView {
     return this.settings.candidateCornerRadiusVp ?? KeyboardMetrics.CANDIDATE_CARD_CORNER_VP;
   }
 
-  /** A 2in1 row's radius: never rounder than a card radius the user chose; a package's radius leaves the rows as they were drawn before the setting existed. */
+  /** 优先使用皮肤行圆角；用户设置卡片圆角时，行圆角不超过卡片。 */
   private candidateItemRadius(): number {
+    const radius: number = this.settings.candidateSkinLayout?.itemRadius ?? KeyboardMetrics.CANDIDATE_ITEM_CORNER_VP;
     return this.settings.candidateCornerRadiusUser
-      ? Math.min(KeyboardMetrics.CANDIDATE_ITEM_CORNER_VP, this.candidateCardRadius())
-      : KeyboardMetrics.CANDIDATE_ITEM_CORNER_VP;
+      ? Math.min(radius, this.candidateCardRadius())
+      : radius;
   }
 
   /** A card fill or border with the user's window opacity applied; the touch strip is part of the keyboard and stays as it is. */
@@ -3229,6 +3314,35 @@ struct KeyboardView {
 
   private candidateSelectedTextColor(): string {
     return this.candidateColors().selectedText;
+  }
+
+  private candidateGeometry(): CandidateSkinGeometry | null {
+    const layout = this.settings.candidateSkinLayout;
+    if (layout === null || layout === undefined) return null;
+    return KeyboardFormFactor.isDesktop() && this.settings.candidateLayout === 'vertical' ? layout.vertical : layout.horizontal;
+  }
+
+  private candidateNumberSize(): number {
+    return CandidateLayoutPolicy.numberSize(this.candidateGeometry(), this.settings.candidateFontSize,
+      CandidateNumberFontPolicy.size(this.settings.candidateFontSize));
+  }
+
+  private candidateGap(vertical: boolean): number {
+    return CandidateLayoutPolicy.gap(this.settings.candidateSkinLayout, vertical, this.settings.candidateFontSize);
+  }
+
+  private candidateRightPadding(): number {
+    return CandidateLayoutPolicy.dip(this.candidateGeometry()?.itemPaddingRight,
+      this.settings.candidateFontSize, KeyboardMetrics.CANDIDATE_PADDING_VP);
+  }
+
+  private candidateBarWidth(): number {
+    return Math.max(3, CandidateLayoutPolicy.dip(this.candidateGeometry()?.selectedBarWidth, this.settings.candidateFontSize, 3));
+  }
+
+  private candidateBarHeight(): number {
+    const height: number = this.candidateGeometry()?.selectedBarHeightEm ?? 0.55;
+    return Math.max(2 * this.candidateBarWidth(), height * this.settings.candidateFontSize);
   }
 
   private candidateNumberColor(highlighted: boolean): string {
@@ -3365,6 +3479,11 @@ struct KeyboardView {
   /** 2in1 候选窗：组合行在候选上方，整体是一张卡片。触屏键盘改为绘制 `touchStrip()`。 */
   @Builder
   candidateStrip() {
+    CandidateCanvasFrame({ scene: this.settings.candidateCanvas,
+      surfaceOpacity: this.settings.candidateWindowOpacity,
+      fallbackColor: this.settings.candidateColors.surface,
+      onSize: (width: number): void => { this.availableWidth = width; },
+      onPanelReady: (key: string, ready: boolean): void => this.canvasReady('strip', key, ready) }) {
     Stack({ alignContent: Alignment.Top }) {
       Column() {
       // The composition line, reserved whether or not anything is being composed so that nothing
@@ -3446,6 +3565,7 @@ struct KeyboardView {
       .width('100%')
       .height(KeyboardFormFactor.isDesktop() && !this.settings.candidateShowPreedit
         ? 0 : KeyboardMetrics.compositionRowHeightVp(this.settings.candidatePreeditFontSize))
+      .margin({ bottom: this.settings.candidateShowPreedit ? this.settings.candidateCanvas?.lineGapDip ?? 0 : 0 })
       .padding({ left: KeyboardMetrics.CANDIDATE_PADDING_VP,
         right: KeyboardMetrics.CANDIDATE_PADDING_VP })
 
@@ -3467,16 +3587,16 @@ struct KeyboardView {
       // 2in1 卡片内设计稿的 8vp，`KeyboardMetrics.candidateHeightVp` 和 `CandidateWidthPolicy.EXTRA_WIDTH_VP` 按此给窗口定尺寸。
       .padding(KeyboardFormFactor.isDesktop() ? KeyboardMetrics.CANDIDATE_CARD_PADDING_VP : 0)
       .margin({ top: this.settings.candidateDecorationTopVp })
-      .backgroundColor(this.candidateCardColor(this.candidateColors().surface))
+      .backgroundColor(this.settings.candidateCanvas === null ? this.candidateCardColor(this.candidateColors().surface) : TRANSPARENT)
       .background(this.candidateBackground)
       .clip(this.settings.candidateBackgroundImage !== null)
       .borderRadius(KeyboardFormFactor.isDesktop()
         ? this.candidateCardRadius()
         : KeyboardMetrics.STRIP_CORNER_VP)
-      .borderWidth(KeyboardFormFactor.isDesktop() ? 1 : 0)
+      .borderWidth(KeyboardFormFactor.isDesktop() && this.settings.candidateCanvas === null ? this.settings.candidateSkinLayout?.borderWidth ?? 1 : 0)
       .borderColor(this.candidateCardColor(this.candidateColors().border))
       .onAreaChange((_old: Area, now: Area): void => {
-        this.availableWidth = Number(now.width);
+        if (this.settings.candidateCanvas === null) this.availableWidth = Number(now.width);
         this.effectCardHeight = Number(now.height);
       })
       // The typing-effect flash: an accent wash over the card that fades after each key. Always present on a 2in1 at opacity 0, so a fade is never cut short by the node going away; it takes no touches.
@@ -3511,6 +3631,7 @@ struct KeyboardView {
       }
     }
     .width('100%')
+    }
   }
 
   /**
@@ -3617,7 +3738,7 @@ struct KeyboardView {
   @Builder
   candidateRow() {
     if (KeyboardFormFactor.isDesktop() && this.settings.candidateLayout === 'vertical') {
-      Column() {
+      Column({ space: this.candidateGap(true) }) {
         ForEach(this.candidates, (candidate: CandidateEntry, index: number) => {
           this.candidateCell(candidate, index)
         }, (candidate: CandidateEntry, index: number) =>
@@ -3627,7 +3748,8 @@ struct KeyboardView {
       // One row per candidate here and exactly one there. The two used to share a ternary applied to
       // the if/else as a whole, which ArkUI cannot do: modifiers belong to a component, and a branch
       // is not one. Each branch states its own height, and the condition already decided which.
-      .height(this.candidateRowHeight() * KeyboardMetrics.visibleCandidateRows(this.candidates.length))
+      .height(this.candidateRowHeight() * KeyboardMetrics.visibleCandidateRows(this.candidates.length)
+        + this.candidateGap(true) * Math.max(0, KeyboardMetrics.visibleCandidateRows(this.candidates.length) - 1))
       .onAxisEvent((event?: AxisEvent): void => {
         if (!this.settings.navigation.mouseWheel || event === undefined) {
           return;
@@ -3642,7 +3764,7 @@ struct KeyboardView {
     } else {
       Row() {
       Scroll() {
-        Row() {
+        Row({ space: this.candidateGap(false) }) {
           ForEach(this.candidates, (candidate: CandidateEntry, index: number) => {
             this.candidateCell(candidate, index)
           }, (candidate: CandidateEntry, index: number) =>
@@ -3751,11 +3873,12 @@ struct KeyboardView {
   candidateCell(candidate: CandidateEntry, index: number) {
     Row() {
       if (candidate.highlighted && this.settings.candidateSelectedBar) {
-        Blank().width(3).height(this.candidateLineHeight() * 0.55)
+        Blank().width(this.candidateBarWidth()).height(this.candidateBarHeight())
           .backgroundColor(this.candidateColors().accent).borderRadius(2)
       }
       if (CandidateNumberFontPolicy.visible(KeyboardFormFactor.isDesktop())) {
-        Text(`${index + 1}`).fontSize(CandidateNumberFontPolicy.size(this.settings.candidateFontSize))
+        Text(this.candidateNumberSize() === 0 ? '' : `${index + 1}`).fontSize(Math.max(1, this.candidateNumberSize()))
+          .constraintSize({ minWidth: this.settings.candidateSkinLayout == null ? 0 : 9 })
           .fontColor(this.candidateNumberColor(candidate.highlighted)).padding({ right: 4 })
       }
       if (this.candidateUsesGlossLine()) {
@@ -3777,11 +3900,11 @@ struct KeyboardView {
       }
     }.alignItems(VerticalAlign.Center)
       .accessibilityText(this.candidateLabel(candidate, index))
-      .padding({ left: KeyboardMetrics.CANDIDATE_PADDING_VP, right: KeyboardMetrics.CANDIDATE_PADDING_VP })
+      .padding({ left: KeyboardMetrics.CANDIDATE_PADDING_VP, right: this.candidateRightPadding() })
       .height(this.candidateRowHeight()).width(this.candidateChipWidth(candidate, index))
       .backgroundColor(index === this.hoveredCandidate ? this.candidateColors().hover
         : candidate.highlighted ? this.candidateColors().selected : TRANSPARENT)
-      .borderRadius(KeyboardFormFactor.isDesktop() ? this.candidateItemRadius() : 0)
+      .borderRadius(KeyboardFormFactor.isDesktop() ? this.candidateItemRadius() : this.settings.candidateSkinLayout?.itemRadius ?? 0)
       .onClick(() => KeyboardSession.shared.choose(index))
       .onHover((isHover: boolean): void => { this.hoveredCandidate = isHover ? index : -1; })
       .gesture(LongPressGesture().onAction(() => this.openTouchCandidateMenu(index)))
@@ -3810,6 +3933,10 @@ struct KeyboardView {
    */
   @Builder
   touchStrip() {
+    CandidateCanvasFrame({ scene: this.stripIdle() || this.surface === SURFACE_GEOMETRY ? null : this.settings.candidateCanvas,
+      fixedContent: true, frameHeight: KeyboardMetrics.STRIP_HEIGHT_VP, fallbackColor: this.settings.candidateColors.surface,
+      onSize: (width: number): void => { this.availableWidth = width; },
+      onPanelReady: (key: string, ready: boolean): void => this.canvasReady('strip', key, ready) }) {
     Column() {
       if (this.surface === SURFACE_GEOMETRY) {
         HeightBar({
@@ -3834,14 +3961,15 @@ struct KeyboardView {
       }
     }
     .width('100%')
-    .height(KeyboardMetrics.STRIP_HEIGHT_VP)
-    .backgroundColor(this.candidateCardColor(this.candidateColors().surface))
+    .height('100%')
+    .backgroundColor(this.settings.candidateCanvas === null || this.stripIdle() ? this.candidateCardColor(this.candidateColors().surface) : TRANSPARENT)
     .background(this.candidateBackground)
     .clip(this.settings.candidateBackgroundImage !== null)
     .borderRadius(KeyboardMetrics.STRIP_CORNER_VP)
     .onAreaChange((_old: Area, now: Area): void => {
-      this.availableWidth = Number(now.width);
+      if (this.settings.candidateCanvas === null) this.availableWidth = Number(now.width);
     })
+    }
   }
 
   /**
@@ -4052,7 +4180,7 @@ struct KeyboardView {
           this.chipLane(2)
         } else if (this.candidates.length > 0) {
           Scroll() {
-            Row() {
+            Row({ space: CandidateLayoutPolicy.gap(this.settings.candidateSkinLayout, false, this.chipFontSize()) }) {
               ForEach(this.candidates, (candidate: CandidateEntry, index: number) => {
                 this.candidateChip(candidate, index)
               }, (candidate: CandidateEntry, index: number) =>
@@ -4118,8 +4246,9 @@ struct KeyboardView {
   /** 胶囊的最小宽度：设计稿的 30vp；预期有注释时为整个注释列宽，这样注释到来时不会撑宽胶囊、把后面的胶囊挤开。 */
   private chipMinWidth(): number {
     const column: number = this.chipGlossColumn();
-    return column > 0 ? Math.max(CHIP_MIN_WIDTH_VP, Math.ceil(column + CHIP_PADDING_VP * 2))
-      : CHIP_MIN_WIDTH_VP;
+    const minimum: number = Math.max(CHIP_MIN_WIDTH_VP,
+      CandidateLayoutPolicy.dip(this.settings.candidateSkinLayout?.horizontal.itemMinWidth, this.chipFontSize(), 0));
+    return column > 0 ? Math.max(minimum, Math.ceil(column + CHIP_PADDING_VP * 2)) : minimum;
   }
 
   /** 注释最多能画多宽：它的列宽，或上方的词更宽时取词宽。 */
@@ -4187,9 +4316,10 @@ struct KeyboardView {
     }
     .constraintSize({ minWidth: this.chipMinWidth() })
     .height(CHIP_HEIGHT_VP)
-    .padding({ left: CHIP_PADDING_VP, right: CHIP_PADDING_VP })
+    .padding({ left: CHIP_PADDING_VP, right: CandidateLayoutPolicy.dip(
+      this.settings.candidateSkinLayout?.horizontal.itemPaddingRight, this.chipFontSize(), CHIP_PADDING_VP) })
     .justifyContent(FlexAlign.Center)
-    .borderRadius(CHIP_RADIUS_VP)
+    .borderRadius(this.settings.candidateSkinLayout?.itemRadius ?? CHIP_RADIUS_VP)
     .backgroundColor(candidate.highlighted ? this.skin.keyBackground : TRANSPARENT)
     .stateStyles({
       normal: {
@@ -7519,7 +7649,8 @@ struct KeyboardView {
 
   /** 网格在内边距以内排布格子所用的宽度；全拼九键三栏面板里是中栏的宽度（`expandedGridWidth`）。 */
   private expandedInnerWidth(): number {
-    return Math.max(0, this.expandedGridWidth() - EXPANDED_PADDING_VP * 2);
+    const width: number = this.settings.candidateCanvas === null ? this.expandedGridWidth() : this.canvasExpandedWidth;
+    return Math.max(0, width - EXPANDED_PADDING_VP * 2);
   }
 
   /** 键盘宽度能容纳的列数，每列至少 `EXPANDED_MIN_COLUMN_VP`。 */
@@ -7619,6 +7750,10 @@ struct KeyboardView {
   /** 展开面板的候选网格，按 `expandedInnerWidth` 排列；整块面板和全拼九键三栏面板的中栏共用。 */
   @Builder
   expandedGrid() {
+    Column() {
+    CandidateCanvasFrame({ scene: this.settings.candidateCanvas, fixedContent: true,
+      fallbackColor: this.settings.candidateColors.surface,
+      onPanelReady: (key: string, ready: boolean): void => this.canvasReady('expanded', key, ready) }) {
     Scroll() {
       Column({ space: EXPANDED_GAP_VP }) {
         ForEach(this.expandedRows(), (row: ExpandedCandidateCell[]) => {
@@ -7629,11 +7764,14 @@ struct KeyboardView {
                 .height(EXPANDED_CELL_HEIGHT_VP)
                 .padding({ left: EXPANDED_CELL_PADDING_VP, right: EXPANDED_CELL_PADDING_VP })
                 .borderRadius(EXPANDED_CELL_RADIUS_VP)
-                .backgroundColor(this.expandedHighlighted(cell.index) ? this.skin.toggleBackground
-                  : this.skin.keyBackground)
+                .backgroundColor(this.settings.candidateCanvas !== null
+                  ? (this.expandedHighlighted(cell.index) ? this.candidateColors().selected : TRANSPARENT)
+                  : this.expandedHighlighted(cell.index) ? this.skin.toggleBackground : this.skin.keyBackground)
                 .fontSize(EXPANDED_FONT_SIZE)
                 .fontWeight(this.expandedHighlighted(cell.index) ? 600 : 400)
-                .fontColor(this.expandedHighlighted(cell.index) ? this.skin.toggleForeground : this.skin.keyForeground)
+                .fontColor(this.settings.candidateCanvas !== null
+                  ? (this.expandedHighlighted(cell.index) ? this.candidateColors().selectedText : this.candidateColors().text)
+                  : this.expandedHighlighted(cell.index) ? this.skin.toggleForeground : this.skin.keyForeground)
                 .fontFamily(this.candidateFontFamily())
                 .textAlign(TextAlign.Center)
                 .maxLines(1)
@@ -7670,6 +7808,10 @@ struct KeyboardView {
     .edgeEffect(EdgeEffect.None)
     .align(Alignment.Top)
     .width('100%')
+    .height('100%')
+    .onAreaChange((_old: Area, now: Area): void => { this.canvasExpandedWidth = Number(now.width); })
+    }
+    }
     .layoutWeight(1)
   }
 
@@ -8528,7 +8670,7 @@ struct KeyboardView {
   }
 
   /**
-   * 触屏表情面板，与设计稿和 Android 的 `buildEmojiPanel` 一致：没有标题栏，八列网格，底行是 ABC、分类标签和 ⌫。标签依次是有最近使用时的 🕘、每个 Unicode 分类一个图标，然后是「颜文字」和「符号」；后两页放的是文字，各有自己的网格，并在网格上方一行列出分组名。
+   * 触屏表情面板，与设计稿和 Android 的 `buildEmojiPanel` 一致：没有标题栏，八列网格，底行是 ABC、分类标签和 ⌫。标签依次是画成缩略图的「水杉娘」（读不到表情包时没有这一个）、有最近使用时的 🕘、每个 Unicode 分类一个图标，然后是「颜文字」「符号」；「颜文字」「符号」两页放的是文字，各有自己的网格，并在网格上方一行列出分组名；「水杉娘」是贴纸网格，见 `mascotStickerGrid`。
    */
   @Builder
   touchEmojiFace() {
@@ -8570,6 +8712,8 @@ struct KeyboardView {
         .columnsTemplate('1fr '.repeat(EMOJI_COLUMNS).trim())
         .width('100%')
         .layoutWeight(1)
+      } else if (this.emojiPanel === STICKER_PANEL) {
+        this.mascotStickerGrid()
       } else {
         Grid(this.emojiGridScroller) {
           ForEach(this.visibleEmojiItems(), (item: string, index: number) => {
@@ -8620,6 +8764,9 @@ struct KeyboardView {
 
         Scroll() {
           Row({ space: EMOJI_GRID_GAP_VP }) {
+            ForEach(this.touchPageTabs(true), (panel: EmojiPanelTab) => {
+              this.touchPageTab(panel)
+            }, (panel: EmojiPanelTab) => `${panel.id}:${this.emojiPanel === panel.id}`)
             if (this.emojiRecents.length > 0) {
               Text(EMOJI_RECENTS_ICON)
                 .fontSize(EMOJI_TAB_FONT_SIZE)
@@ -8651,19 +8798,8 @@ struct KeyboardView {
                 .onClick(() => this.loadEmoji(category.group))
             }, (category: EmojiCategory) =>
               `${category.group}:${this.emojiCategoryActive(category.group)}`)
-            ForEach(EMOJI_PANEL_TABS.filter((panel: EmojiPanelTab): boolean => panel.id !== EMOJI_PANEL),
-              (panel: EmojiPanelTab) => {
-              Text(panel.title)
-                .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
-                .fontColor(this.emojiPanel === panel.id ? this.emojiSkin.keyForeground : this.emojiSkin.secondary)
-                .textAlign(TextAlign.Center)
-                .constraintSize({ minWidth: EMOJI_TAB_VP })
-                .height(EMOJI_TAB_VP)
-                .padding({ left: EMOJI_PAGE_TAB_PADDING_VP, right: EMOJI_PAGE_TAB_PADDING_VP })
-                .borderRadius(EMOJI_TAB_RADIUS_VP)
-                .backgroundColor(this.emojiPanel === panel.id ? this.emojiSkin.keyBackground : Color.Transparent)
-                .accessibilityText(this.emojiPanel === panel.id ? `${panel.title}，已选中` : panel.title)
-                .onClick(() => this.showEmojiPanel(panel.id))
+            ForEach(this.touchPageTabs(false), (panel: EmojiPanelTab) => {
+              this.touchPageTab(panel)
             }, (panel: EmojiPanelTab) => `${panel.id}:${this.emojiPanel === panel.id}`)
           }
           .constraintSize({ minWidth: '100%' })
@@ -8710,7 +8846,107 @@ struct KeyboardView {
     .backgroundColor(this.emojiSkin.background)
   }
 
-  /** 2in1 表情面板，参照 Windows 版：「表情」「颜文字」「符号」「剪贴板」标签、分组行、搜索行和网格。 */
+  /** 要画的页签和顺序：读得到水杉娘表情包时「水杉娘」排第一，读不到时不画它，其余照常量里的顺序。 */
+  private emojiPageTabs(tabs: EmojiPanelTab[]): EmojiPanelTab[] {
+    return MascotStickerPolicy.tabOrder<EmojiPanelTab>(tabs, (panel: EmojiPanelTab): string => panel.id,
+      this.mascotStickers.length > 0);
+  }
+
+  /**
+   * 触屏底栏上「表情」一页展开成 🕘 和各分类图标，其他页签按 `emojiPageTabs` 的顺序分在它两边：`leading` 为真时取排在「表情」之前的（读得到表情包时就是「水杉娘」），否则取之后的「颜文字」「符号」。
+   */
+  private touchPageTabs(leading: boolean): EmojiPanelTab[] {
+    const tabs: EmojiPanelTab[] = this.emojiPageTabs(EMOJI_PANEL_TABS);
+    const emoji: number = tabs.findIndex((panel: EmojiPanelTab): boolean => panel.id === EMOJI_PANEL);
+    return leading ? tabs.slice(0, emoji) : tabs.slice(emoji + 1);
+  }
+
+  /** 触屏底栏上的一个页签：「水杉娘」画清单第一张的缩略图，大小、圆角和选中态底色与分类图标一样；其余画标题。 */
+  @Builder
+  touchPageTab(panel: EmojiPanelTab) {
+    if (panel.id === STICKER_PANEL) {
+      Image(KeyboardSession.shared.mascotStickers.uri(this.mascotStickers[0]))
+        .width(EMOJI_TAB_VP)
+        .height(EMOJI_TAB_VP)
+        .padding(STICKER_TAB_INSET_VP)
+        .objectFit(ImageFit.Contain)
+        .sourceSize({ width: EMOJI_TAB_VP, height: EMOJI_TAB_VP })
+        .draggable(false)
+        .borderRadius(EMOJI_TAB_RADIUS_VP)
+        .backgroundColor(this.emojiPanel === panel.id ? this.emojiSkin.keyBackground : Color.Transparent)
+        .opacity(this.emojiPanel === panel.id ? 1 : EMOJI_TAB_IDLE_OPACITY)
+        .accessibilityText(MascotStickerPolicy.tabAccessibilityText(this.emojiPanel === panel.id))
+        .onClick(() => this.showEmojiPanel(panel.id))
+    } else {
+      Text(panel.title)
+        .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
+        .fontColor(this.emojiPanel === panel.id ? this.emojiSkin.keyForeground : this.emojiSkin.secondary)
+        .textAlign(TextAlign.Center)
+        .constraintSize({ minWidth: EMOJI_TAB_VP })
+        .height(EMOJI_TAB_VP)
+        .padding({ left: EMOJI_PAGE_TAB_PADDING_VP, right: EMOJI_PAGE_TAB_PADDING_VP })
+        .borderRadius(EMOJI_TAB_RADIUS_VP)
+        .backgroundColor(this.emojiPanel === panel.id ? this.emojiSkin.keyBackground : Color.Transparent)
+        .accessibilityText(this.emojiPanel === panel.id ? `${panel.title}，已选中` : panel.title)
+        .onClick(() => this.showEmojiPanel(panel.id))
+    }
+  }
+
+  /** 贴纸格子的边长，按量出来的网格宽度和列数算。 */
+  private mascotStickerSide(): number {
+    return MascotStickerPolicy.cellSideVp(this.mascotStickerGridWidth,
+      MascotStickerPolicy.columns(this.mascotStickerGridWidth), EMOJI_GRID_GAP_VP);
+  }
+
+  /**
+   * 水杉娘表情包的网格，触屏与 2in1 共用：竖屏手机一行五个正方形格子，更宽时按每格约 72vp 加列（`MascotStickerPolicy.columns`）。每格等比缩放居中、四周留白，按显示大小下采样解码；按下时与表情格一样放大。宽度量出来之前不放格子，免得先按 1vp 解码一遍。
+   */
+  @Builder
+  mascotStickerGrid() {
+    Grid(this.emojiGridScroller) {
+      if (this.mascotStickerGridWidth > 0) {
+        LazyForEach(this.mascotStickerSource, (sticker: MascotSticker, index: number) => {
+          GridItem() {
+            Image(KeyboardSession.shared.mascotStickers.uri(sticker))
+              .width('100%')
+              .height('100%')
+              .padding(MASCOT_STICKER_INSET_VP)
+              .objectFit(ImageFit.Contain)
+              .sourceSize({
+                width: MascotStickerPolicy.decodeSideVp(this.mascotStickerSide()),
+                height: MascotStickerPolicy.decodeSideVp(this.mascotStickerSide())
+              })
+              .draggable(false)
+              .borderRadius(KeyboardMetrics.KEY_CORNER_VP)
+              .backgroundColor(this.panelKeySelected(index) ? this.emojiSkin.keyBackground : Color.Transparent)
+              .accessibilityText(MascotStickerPolicy.accessibilityText(sticker))
+              .stateStyles({
+                normal: {
+                  .scale({ x: 1, y: 1 })
+                },
+                pressed: {
+                  .scale({ x: EMOJI_PRESSED_SCALE, y: EMOJI_PRESSED_SCALE })
+                }
+              })
+              .animation({ duration: EMOJI_PRESS_MS })
+              .onClick(() => this.sendMascotSticker(sticker))
+          }
+          .height(this.mascotStickerSide())
+        }, (sticker: MascotSticker) => sticker.file)
+      }
+    }
+    .columnsTemplate('1fr '.repeat(MascotStickerPolicy.columns(this.mascotStickerGridWidth)).trim())
+    .columnsGap(EMOJI_GRID_GAP_VP)
+    .rowsGap(EMOJI_GRID_GAP_VP)
+    .padding({ left: EMOJI_GRID_GAP_VP, right: EMOJI_GRID_GAP_VP })
+    .width('100%')
+    .layoutWeight(1)
+    .onAreaChange((_old: Area, now: Area): void => {
+      this.mascotStickerGridWidth = Math.max(0, Number(now.width) - EMOJI_GRID_GAP_VP * 2);
+    })
+  }
+
+  /** 2in1 表情面板，参照 Windows 版：「水杉娘」「表情」「颜文字」「符号」「剪贴板」标签（读不到表情包时没有「水杉娘」）、分组行、搜索行和网格。 */
   @Builder
   desktopEmojiFace() {
     Column() {
@@ -8746,7 +8982,7 @@ struct KeyboardView {
 
       Scroll() {
         Row({ space: KeyboardMetrics.KEY_SPACING_VP }) {
-          ForEach(KeyboardFormFactor.isDesktop() ? DESKTOP_EMOJI_PANEL_TABS : EMOJI_PANEL_TABS,
+          ForEach(this.emojiPageTabs(KeyboardFormFactor.isDesktop() ? DESKTOP_EMOJI_PANEL_TABS : EMOJI_PANEL_TABS),
             (panel: EmojiPanelTab) => {
             Text(panel.title)
               .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
@@ -8817,7 +9053,8 @@ struct KeyboardView {
                 .height(KeyboardMetrics.ROW_HEIGHT_VP * 3 / 5)
                 .onClick(() => this.clearClipboard())
             }
-          } else {
+          } else if (this.emojiPanel === SYMBOLS_PANEL) {
+            // 符号页列出分组；「水杉娘」只有一组，不进任何分支，这一行留空。
             ForEach(this.emojiSymbolTabs, (tab: EmojiPanelGroupTab) => {
               Text(tab.title)
                 .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
@@ -8838,7 +9075,8 @@ struct KeyboardView {
       .align(Alignment.Start)
 
       // The Windows panel's search box. Not a text field: that would ask the system for an input method inside the input method. The physical keys the panel receives spell it instead (EmojiPanelKeyPolicy), so only a 2in1, which routes them here, draws it.
-      if (KeyboardFormFactor.isDesktop() && this.desktop === DesktopSurface.EMOJI) {
+      // 表情包不做搜索，没有搜索行。
+      if (KeyboardFormFactor.isDesktop() && this.desktop === DesktopSurface.EMOJI && this.emojiPanel !== STICKER_PANEL) {
         Row() {
           Text(this.emojiQuery.length > 0 ? this.emojiQuery : this.emojiSearchPlaceholder())
             .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
@@ -8863,6 +9101,8 @@ struct KeyboardView {
 
       if (this.emojiPanel === CLIPBOARD_PANEL) {
         this.clipboardEntries()
+      } else if (this.emojiPanel === STICKER_PANEL) {
+        this.mascotStickerGrid()
       } else if (this.emojiQuery.length > 0 && this.emojiResults.length === 0) {
         Text('没有匹配的结果')
           .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
@@ -9169,6 +9409,8 @@ struct KeyboardView {
       }
       .width('100%')
       .height('100%')
+      .opacity(KeyboardFormFactor.isDesktop() && this.desktop === DesktopSurface.NONE
+        && this.settings.candidateCanvas !== null ? 0 : 1)
       .padding({ top: CandidateDecorationLayout.backdropInsetVp(KeyboardFormFactor.isDesktop(),
         this.settings.candidateDecorationImage !== null, this.settings.candidateDecorationTopVp,
         KeyboardMetrics.ROOT_VERTICAL_PADDING_VP) })

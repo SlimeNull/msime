@@ -12,11 +12,18 @@ use std::io::Cursor;
 use std::path::Path;
 use toml::Value;
 
+mod factory_layout;
+mod toolbar_image;
 mod windows_looks;
 /// 定义在 `crate::text`（偏好校验要用），从这里导回。
 pub(crate) use crate::text::safe_id;
 /// 定义在 `crate::theme`（偏好校验要用），从这里导回，原来的路径照常可用。
 pub use crate::theme::is_selectable_id;
+pub use factory_layout::ResolvedSkinLayout;
+pub use toolbar_image::{
+    SkinToolbarButtonFlow, SkinToolbarButtonLook, SkinToolbarImage, SkinToolbarImageButton,
+    ToolbarFlowDirection, ToolbarImageButtonSlot, ToolbarImageLayout, TOOLBAR_BUTTON_KEYS,
+};
 pub use windows_looks::{
     is_windows_look, WINDOWS_BUILTIN_IDS, WINDOWS_DEFAULTS_FOLDER, WINDOWS_LOOK_IDS,
 };
@@ -230,6 +237,9 @@ pub struct SkinSummary {
     pub horizontal: SkinGeometry,
     #[serde(skip_serializing_if = "SkinGeometry::is_empty")]
     pub vertical: SkinGeometry,
+    /// 绘制专用的出厂继承结果；原始几何字段保留皮肤声明，供编辑器区分“未声明”。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_layout: Option<ResolvedSkinLayout>,
     pub decoration_top_dip: f64,
     pub decoration_width_dip: f64,
     /// The image drawn in the decoration band, relative to the package: `candidate_window.decoration.image`, or else the package `preview` when that is an image. Set only for a decorated package (both decoration sizes above zero).
@@ -246,6 +256,9 @@ pub struct SkinSummary {
     pub background: Option<SkinBackground>,
     /// The floating toolbar's own geometry and colours, drawn over what the base theme derives and under `toolbar_stylesheet`.
     pub toolbar: SkinToolbar,
+    /// 图片工具栏的布局与资源；`None` 表示普通条形模式。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolbar_image: Option<SkinToolbarImage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub toolbar_icon_corner_radius_dip: Option<f64>,
     /// `[candidate_window.border_image]` 九宫格面板。只在 `base = "canvas"` 时读取；按 msime-windows 的规则校验并保留，供支持贴图的宿主绘制；其他宿主使用可读回退（见 [`Self::panel_candidate`]）。
@@ -451,14 +464,14 @@ pub struct SkinToolbar {
 }
 
 /// 候选窗清单中的长度：可以是固定 DIP，也可以是按候选字号缩放的 em。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkinLength {
     pub value: f64,
     pub em: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkinInsets {
     pub top: f64,
@@ -467,7 +480,7 @@ pub struct SkinInsets {
     pub left: f64,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkinGeometry {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -936,6 +949,7 @@ fn load(root: &Path, folder: &str) -> Result<SkinSummary, String> {
         )?),
     };
     let mut toolbar = read_toolbar(table)?;
+    let toolbar_image = toolbar_image::read(table, &mut notices)?;
     let license = match table.get("license") {
         None => None,
         Some(value) => {
@@ -1009,6 +1023,7 @@ fn load(root: &Path, folder: &str) -> Result<SkinSummary, String> {
         geometry,
         horizontal,
         vertical,
+        resolved_layout: None,
         decoration_top_dip: top,
         decoration_width_dip: width,
         decoration_image,
@@ -1018,6 +1033,7 @@ fn load(root: &Path, folder: &str) -> Result<SkinSummary, String> {
         decoration_frames: 0,
         background,
         toolbar,
+        toolbar_image,
         toolbar_icon_corner_radius_dip,
         border_image,
         content_insets_dip,
@@ -1032,6 +1048,14 @@ fn load(root: &Path, folder: &str) -> Result<SkinSummary, String> {
         license,
         notices,
     };
+    summary.resolved_layout = factory_layout::resolve(
+        if canvas {
+            Some("canvas")
+        } else {
+            windows_look.as_deref()
+        },
+        &summary,
+    );
     summary.decoration_frames = validate_image_dimensions(&dir, &summary)?;
     Ok(summary)
 }
@@ -1381,14 +1405,15 @@ pub(crate) fn png_frames(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
 /// GIF 解码时允许分配的内存。逻辑画布每边不超过 [`MAX_IMAGE_SIDE`]，展开成 RGBA 是 16 MiB；逐帧迭代同时持有常驻画布、这一帧的原始缓冲和合成后的整幅画面，所以给三份。`image` 默认不给 GIF 设上限，而帧描述符的宽高不受逻辑画布约束，一个声明 65535×65535 帧的小文件就会让解码器申请约 17 GB，这道上限让它在分配前报错。
 const MAX_GIF_DECODE_ALLOC: u64 = MAX_IMAGE_SIDE as u64 * MAX_IMAGE_SIDE as u64 * 4 * 3;
 
-/// 统计 GIF/WebP 的动画帧。这些格式的帧数不在 `ImageReader` 的公共尺寸接口里，但宿主同样会把每帧展开成整张画布，所以和 APNG 一样受帧数与像素上限约束。`frame_pixels` 是一帧整幅画布的像素数，`remaining_pixels` 是这个包还剩的像素额度：迭代器是惰性的，一超额度就停，不再解码后面的帧，一个包的解码量因此也不超过 [`MAX_PACKAGE_PIXELS`] 加一帧。连第一帧都读不出的旧资源按静态图处理，保持扫描对旧包的宽容；读出几帧之后才损坏的，按已读出的帧数计，因为宿主照样会播放坏帧之前的部分。帧描述符超出解码内存上限的按尺寸超限拒绝。
+/// 统计 GIF/WebP 的动画帧。这些格式的帧数不在 `ImageReader` 的公共尺寸接口里，但宿主同样会把每帧展开成整张画布，所以和 APNG 一样受帧数与像素上限约束。`dimensions` 是一帧整幅画布的尺寸，`remaining_pixels` 是这个包还剩的像素额度：迭代器是惰性的，一超额度就停，不再解码后面的帧，一个包的解码量因此也不超过 [`MAX_PACKAGE_PIXELS`] 加一帧。连第一帧都读不出的旧资源按静态图处理，保持扫描对旧包的宽容；读出几帧之后才损坏的，按已读出的帧数计，因为宿主照样会播放坏帧之前的部分。帧描述符超出解码内存上限的按尺寸超限拒绝；WebP 另外在解码前核对全部内部帧几何，几何无效时拒绝，不回退为静态图。
 fn decoded_animation_frames(
     bytes: &[u8],
     format: image::ImageFormat,
-    frame_pixels: u64,
+    dimensions: (u32, u32),
     remaining_pixels: u64,
 ) -> Result<(u32, u32), &'static str> {
     use image::ImageDecoder;
+    let frame_pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
     let frames = match format {
         image::ImageFormat::Gif => {
             let Ok(mut decoder) = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)) else {
@@ -1403,7 +1428,13 @@ fn decoded_animation_frames(
             decoder.into_frames()
         }
         image::ImageFormat::WebP => {
-            // WebP frames are decoded into a canvas of the container's size, which the caller already checked against MAX_IMAGE_SIDE.
+            // 解码器会先展开内部位流再检查画布尺寸，必须在这里先核对每一帧。
+            super::webp_preflight::check(bytes, dimensions, remaining_pixels).map_err(|error| {
+                match error {
+                    super::webp_preflight::Error::Invalid => "invalid WebP frame geometry",
+                    super::webp_preflight::Error::Limit => IMAGE_DIMENSIONS_TOO_LARGE,
+                }
+            })?;
             let Ok(decoder) = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)) else {
                 return Ok((1, 1));
             };
@@ -1434,36 +1465,7 @@ fn decoded_animation_frames(
 /// 检查清单引用的 PNG/JPEG/GIF/WebP 尺寸，避免宿主把声明为极大尺寸的压缩图片交给系统解码器。动画图的每一帧都按整张画布计入像素合计，帧数不超过 [`MAX_ANIMATION_FRAMES`]，所以一个包解码后的位图总量与静态图同一个上限。返回装饰图的帧数（没有装饰图时为 0）。
 /// 不能解析的旧资源仍由宿主按原有方式处理；社区发布和安装会再做完整解码检查。
 fn validate_image_dimensions(dir: &Path, summary: &SkinSummary) -> Result<u32, String> {
-    let mut paths = Vec::new();
-    for path in [
-        summary.decoration_image.as_deref(),
-        summary
-            .background
-            .as_ref()
-            .map(|background| background.image.as_str()),
-        summary.preview.as_deref().filter(|path| is_image(path)),
-        summary
-            .border_image
-            .as_ref()
-            .map(|image| image.source.as_str()),
-        summary
-            .border_image
-            .as_ref()
-            .and_then(|image| image.light_source.as_deref()),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !paths.iter().any(|existing| existing == &path) {
-            paths.push(path);
-        }
-    }
-    for decoration in &summary.decorations {
-        if !paths.iter().any(|existing| existing == &decoration.image) {
-            paths.push(decoration.image.as_str());
-        }
-    }
-
+    let paths = referenced_image_paths(summary);
     let mut pixels = 0_u64;
     let mut decoration_frames = u32::from(summary.decoration_image.is_some());
     for path in paths {
@@ -1504,7 +1506,7 @@ fn validate_image_dimensions(dir: &Path, summary: &SkinSummary) -> Result<u32, S
                 decoded_animation_frames(
                     &bytes,
                     format,
-                    u64::from(width) * u64::from(height),
+                    (width, height),
                     MAX_PACKAGE_PIXELS - pixels,
                 )?
             }
@@ -1521,6 +1523,129 @@ fn validate_image_dimensions(dir: &Path, summary: &SkinSummary) -> Result<u32, S
         }
     }
     Ok(decoration_frames)
+}
+
+/// 清单生效的图片引用，供扫描预算、资源导出与社区整包共同使用；同一路径只列一次。
+pub(crate) fn referenced_image_paths(summary: &SkinSummary) -> Vec<&str> {
+    let mut paths = Vec::new();
+    for path in [
+        summary.decoration_image.as_deref(),
+        summary
+            .background
+            .as_ref()
+            .map(|background| background.image.as_str()),
+        summary.preview.as_deref().filter(|path| is_image(path)),
+        summary
+            .border_image
+            .as_ref()
+            .map(|image| image.source.as_str()),
+        summary
+            .border_image
+            .as_ref()
+            .and_then(|image| image.light_source.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !paths.iter().any(|existing| existing == &path) {
+            paths.push(path);
+        }
+    }
+    for decoration in &summary.decorations {
+        if !paths.iter().any(|existing| existing == &decoration.image) {
+            paths.push(decoration.image.as_str());
+        }
+    }
+    if let Some(toolbar) = &summary.toolbar_image {
+        for path in toolbar.image_paths() {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+/// 清单里一张图片在磁盘上的样子，见 [`package_files`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkinImageFile {
+    /// 清单里写的包内相对路径。
+    pub path: String,
+    /// 文件的字节数。
+    pub bytes: u64,
+    /// 按内容认出的编码：`png`、`apng`（多于一帧的 PNG）、`jpeg`、`gif` 或 `webp`；认不出时为 `None`，这样的旧资源由宿主按原有方式处理。
+    pub format: Option<&'static str>,
+    /// 一帧整幅画布的宽和高；认不出编码或读不出尺寸时为 `None`。
+    pub dimensions: Option<(u32, u32)>,
+    /// 动画帧数，静态图为 1。
+    pub frames: u32,
+}
+
+/// 一款已安装皮肤的清单原文和它引用的图片，供修改后整包重装。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkinPackageFiles {
+    /// `skin.toml` 原文，去掉开头的字节序标记。
+    pub manifest: String,
+    /// 清单引用的图片，顺序与同一路径只列一次的规则同扫描时一样。
+    pub images: Vec<SkinImageFile>,
+}
+
+/// 读 `root` 下已安装、能用（与 [`scan`] 同一条规则）的皮肤 `id` 的清单原文和它引用的每张图片。文件经不跟随符号链接的句柄读，清单最多 64 KiB，每张图最多 [`MAX_RESOURCE_BYTES`]；格式、尺寸和帧数按扫描时的同一套方法得出，读不出的旧资源报告为认不出，不算错误。
+pub fn package_files(root: impl AsRef<Path>, id: &str) -> Result<SkinPackageFiles, String> {
+    let root = root.as_ref();
+    let summary = load_package(root, id)?;
+    let dir = root.join(id);
+    let read = |path: &Path, limit: usize| {
+        let input = crate::storage::open_private_file_in(path)
+            .map_err(|_| "a skin file is unavailable".to_owned())?;
+        crate::bounded_io::read_bounded_file_with(
+            input,
+            limit as u64,
+            || "a skin file is too large".to_owned(),
+            |_| "a skin file is unavailable".to_owned(),
+        )
+    };
+    let manifest = String::from_utf8(read(&dir.join("skin.toml"), 65_536)?)
+        .map_err(|_| "skin.toml is not UTF-8".to_owned())?;
+    let manifest = match manifest.strip_prefix('\u{feff}') {
+        Some(body) => body.to_owned(),
+        None => manifest,
+    };
+    let mut images = Vec::new();
+    for path in referenced_image_paths(&summary) {
+        let bytes = read(&dir.join(path), MAX_RESOURCE_BYTES)?;
+        let reader = image::ImageReader::new(Cursor::new(&bytes[..]))
+            .with_guessed_format()
+            .ok();
+        let format = reader.as_ref().and_then(|reader| reader.format());
+        let dimensions = reader.and_then(|reader| reader.into_dimensions().ok());
+        let frames = match (format, dimensions) {
+            (Some(image::ImageFormat::Png), _) => {
+                png_frames(&bytes).map_or(1, |(frames, _)| frames)
+            }
+            (Some(format @ (image::ImageFormat::Gif | image::ImageFormat::WebP)), Some(size)) => {
+                decoded_animation_frames(&bytes, format, size, MAX_PACKAGE_PIXELS)
+                    .map_or(1, |(frames, _)| frames)
+            }
+            _ => 1,
+        };
+        let format = match format {
+            Some(image::ImageFormat::Png) if frames > 1 => Some("apng"),
+            Some(image::ImageFormat::Png) => Some("png"),
+            Some(image::ImageFormat::Jpeg) => Some("jpeg"),
+            Some(image::ImageFormat::Gif) => Some("gif"),
+            Some(image::ImageFormat::WebP) => Some("webp"),
+            _ => None,
+        };
+        images.push(SkinImageFile {
+            path: path.to_owned(),
+            bytes: bytes.len() as u64,
+            dimensions: format.and(dimensions),
+            format,
+            frames,
+        });
+    }
+    Ok(SkinPackageFiles { manifest, images })
 }
 
 /// 读 `decoration.motion` 和 `decoration.motion_period_ms`。两者都只在 schema 2 里可写，并且只对有装饰的包有意义；版本 1 保持静态，与 `[animation]` 相同。
@@ -1908,11 +2033,27 @@ pub fn scan(root: impl AsRef<Path>) -> SkinCatalog {
 /// Most installed skins published to hosts that draw the candidate panel from `candidate_skin_catalog` (the Linux IBus and Fcitx5 hosts). Beyond this a skin menu is no longer usable, and every entry costs the document those hosts read whole.
 pub const HOST_CATALOG_MAX_PACKAGES: usize = 32;
 
-/// The installed skins in the shape a native candidate host reads (`candidate_skin_catalog` in the Linux runtime options): the id, the manifest name as `title`, the `base` global theme id, the declared `layouts`, per declared theme (an empty object when it sets no colour) every candidate colour `theme::resolve` reads (surface, border, text, number, accent, selected, hover, translation, each normalized by `theme::normalized_color`) and `show_selected_bar`, the card's `corner_radius_dip` when the manifest sets one, and for a package that declares a decoration its size and the absolute path of the image drawn there (`decoration_top_dip`, `decoration_width_dip`, `decoration_image`), plus `decoration_align` when it is not the default `right`. `root` is the directory `catalog` was scanned from. Passing an entry to `msime_client_resolve_theme` as `package` therefore resolves exactly as reading the same package from the skin root does.
+/// `host_candidate_catalog` 条目里只有宿主正在画这一款时才用得上的键：背景图和工具栏配色。运行时选项放不下时先从没选中的包上去掉它们，再整包丢弃；去掉后条目仍是完整可读的配色条目。
+pub const HOST_CATALOG_DRAWN_EXTRAS: [&str; 4] = [
+    "background_image",
+    "background_fit",
+    "background_opacity",
+    "toolbar",
+];
+
+/// 原生候选宿主读取的已安装皮肤目录（Linux 运行时选项中的 `candidate_skin_catalog`）。
+/// 每个条目包含 `id`、清单名称 `title`、全局主题 `base`、声明的 `layouts`、各主题的候选配色、
+/// `show_selected_bar`、可选的 `corner_radius_dip`、Windows 基底的 `resolvedLayout`，以及已声明装饰的尺寸、绝对图片路径和非默认对齐。
+/// 配色由 `theme::normalized_color` 规范化；把条目作为 `package` 传给 `msime_client_resolve_theme`，
+/// 与从皮肤根目录加载同一个包的解析结果一致。`root` 必须对应扫描 `catalog` 的目录。
 ///
-/// Everything else in a package - the background image, the toolbar, other paths and stylesheets - stays out: the Linux hosts cannot draw them and every byte counts against the size limit of the document it reads, which is also why an undecorated package carries no decoration keys at all. A colour `normalized_color` cannot read is left out, as `resolve` ignores it. A palette is kept only for a theme the package declares, since every host drops an external skin for a layout or theme it does not support rather than drawing its colours there, and `resolve` does the same with the published `layouts` and themes. Ids and names are already bounded by `scan`; the hosts re-check both, and the decoration's bounds.
+/// 条目还带可选的行圆角 `item_corner_radius_dip`、背景图（`background_image` 绝对路径、`background_fit`、`background_opacity`）和按模式的工具栏配色 `toolbar`（不含菜单用不到的 `handle`）。每个包都带：Fcitx5 的「主题」菜单换皮肤时不重写运行时选项，宿主只能从这份目录里读到新皮肤的背景图和工具栏配色。文档放不下时由 `linux_runtime_options::runtime_options_with_skin_catalog` 先从末尾去掉没选中的包的这几样（`HOST_CATALOG_DRAWN_EXTRAS`），再整包丢弃。条目不携带其他路径或样式表；`resolvedLayout` 只含已校验的数字和开关。
+/// 没有装饰的包不写装饰键；不可解析的颜色省略，只保留清单声明主题的配色。
+/// `scan` 已限制标识与名称，宿主仍复核它们和装饰尺寸；布局与明暗支持范围沿用共享解析器的规则。
 ///
 /// 最多列出 `HOST_CATALOG_MAX_PACKAGES` 个，按目录顺序。`selected` 是自定义主题选中的皮肤（浅色、深色两个槽位）：已安装的一律列出，落在上限之外时挤掉上限内最后几个没选中的，排到末尾，因为屏幕上画的是它们的颜色。
+/// 含 canvas 包且根目录为绝对 UTF-8 路径时，顶层另带 `directory`，供 Fcitx5 按需调用包 API。
+/// 旧宿主继续只读 `packages`；它们严格解析的条目不增加 canvas 字段，配色仍是可读回退。
 pub fn host_candidate_catalog(
     catalog: &SkinCatalog,
     root: &Path,
@@ -1939,6 +2080,9 @@ pub fn host_candidate_catalog(
     let mut packages = Vec::with_capacity(HOST_CATALOG_MAX_PACKAGES);
     packages.extend(listed.into_iter().map(|package| {
             let mut entry = serde_json::json!({ "id": package.id, "title": package.name, "base": package.base, "layouts": package.layouts });
+            if let Some(layout) = &package.resolved_layout {
+                entry["resolvedLayout"] = serde_json::to_value(layout).expect("布局结果可序列化");
+            }
             let mut candidate = serde_json::Map::new();
             for (theme, palette) in [
                 ("light", &package.candidate.light),
@@ -1968,9 +2112,39 @@ pub fn host_candidate_catalog(
             if let Some(radius) = package.corner_radius_dip {
                 entry["corner_radius_dip"] = radius.into();
             }
+            // 行圆角、背景图和工具栏配色只给能画它们的宿主：Linux 的 Fcitx5 经典界面主题按行圆角画选中高亮，把背景图画在卡片里，把工具栏配色用到它画的菜单上（工具栏的功能也都在输入法菜单里；X11 上另画的悬浮工具栏还不读这组颜色）。每个包都带上：Fcitx5 的「主题」菜单换皮肤时不重写运行时选项，换上的那一款只能从这里读到它们；文档预算不够时由运行时选项那一层先去掉没选中的包的这几样。
+            if let Some(radius) = package.item_corner_radius_dip {
+                entry["item_corner_radius_dip"] = radius.into();
+            }
+            if let Some((image, background)) = host_background_image(root, package) {
+                entry["background_image"] = image.into();
+                entry["background_fit"] =
+                    serde_json::to_value(background.fit).expect("an enum serializes");
+                entry["background_opacity"] = background.opacity.into();
+            }
+            let mut toolbar = serde_json::Map::new();
+            for (theme, palette) in [
+                ("light", &package.toolbar.light),
+                ("dark", &package.toolbar.dark),
+            ] {
+                let colors = host_toolbar_palette(palette);
+                if package.supports_theme(theme) && !colors.is_empty() {
+                    toolbar.insert(theme.to_owned(), serde_json::Value::Object(colors));
+                }
+            }
+            if !toolbar.is_empty() {
+                entry["toolbar"] = serde_json::Value::Object(toolbar);
+            }
             entry
         }));
-    serde_json::json!({ "packages": packages })
+    let mut published = serde_json::json!({ "packages": packages });
+    // canvas 宿主按需复用已校验的包 API；顶层扩展不改变旧宿主严格读取的配色条目。
+    if catalog.packages.iter().any(|package| package.canvas) && root.is_absolute() {
+        if let Some(directory) = root.to_str() {
+            published["directory"] = directory.into();
+        }
+    }
+    published
 }
 
 /// The image a decorated package draws above its candidate window: its `decoration_image` (the manifest's `decoration.image`, or else its preview, as on Windows where candidate_presenter.cpp draws `<skins>/<id>/<preview>` in a band `decoration_top_dip` tall). `scan` has already confined it to the package directory and checked it is an image. No decoration is published when the path would not be absolute or not UTF-8, since the host could not open it.
@@ -1981,6 +2155,36 @@ fn host_decoration_image(root: &Path, package: &SkinSummary) -> Option<String> {
         return None;
     }
     path.to_str().map(str::to_owned)
+}
+
+/// 包的背景图（`candidate_window.background`）的绝对路径，和装饰图同样的规则：`scan` 已把它限制在包目录里并确认是图片，拼不出绝对的 UTF-8 路径时不发布，因为宿主打不开它。
+fn host_background_image<'a>(
+    root: &Path,
+    package: &'a SkinSummary,
+) -> Option<(String, &'a SkinBackground)> {
+    let background = package.background.as_ref()?;
+    let path = root.join(&package.id).join(&background.image);
+    if !path.is_absolute() {
+        return None;
+    }
+    Some((path.to_str()?.to_owned(), background))
+}
+
+/// 一个模式的工具栏配色，只留宿主读得懂的 `#RRGGBB` 或 `#RRGGBBAA`，与候选配色同样处理。拖动把手 `handle` 不发布：Linux 把工具栏配色用在输入法菜单上，菜单没有把手。
+fn host_toolbar_palette(palette: &ToolbarPalette) -> serde_json::Map<String, serde_json::Value> {
+    let mut colors = serde_json::Map::new();
+    for (key, value) in [
+        ("background", &palette.background),
+        ("border", &palette.border),
+        ("divider", &palette.divider),
+        ("icon", &palette.icon),
+        ("hover", &palette.hover),
+    ] {
+        if let Some(value) = value.as_deref().and_then(super::theme::normalized_color) {
+            colors.insert(key.to_owned(), value.into());
+        }
+    }
+    colors
 }
 
 fn host_palette(palette: &CandidatePalette) -> serde_json::Map<String, serde_json::Value> {
@@ -2007,3 +2211,7 @@ fn host_palette(palette: &CandidatePalette) -> serde_json::Map<String, serde_jso
 
 #[cfg(test)]
 mod tests;
+
+/// `tests/fixtures/candidate-skins` 下验证皮肤的解析结果。
+#[cfg(test)]
+mod gallery_tests;

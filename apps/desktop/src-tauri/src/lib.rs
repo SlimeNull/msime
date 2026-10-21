@@ -40,10 +40,17 @@ use panel_input::{send_panel_key_windows, send_panel_text_windows, windows_panel
 
 #[cfg(target_os = "android")]
 use platform::android::android_account;
-#[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+#[cfg(any(
+    target_os = "ios",
+    target_os = "android",
+    target_os = "windows",
+    target_os = "linux"
+))]
 use platform::community_resources;
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use platform::desktop::desktop_cloud_dictionary;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use platform::desktop::desktop_settings_sync;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use platform::desktop::{
     desktop_account, desktop_candidate_skin_community, desktop_community_report,
@@ -67,7 +74,7 @@ use platform::mobile::mobile_account_helpers::parse_cloud_dictionary_request;
 #[cfg(any(target_os = "ios", target_os = "android"))]
 use platform::mobile::mobile_community;
 #[cfg(windows)]
-use platform::windows::{windows_account, windows_settings_sync, windows_voice};
+use platform::windows::{windows_account, windows_voice};
 
 use msime_client_core::clipboard::ClipboardHistoryStore;
 use msime_client_core::host_surface::{HostCapabilities, HostPlatform, SurfaceRoute};
@@ -239,6 +246,9 @@ fn host_capabilities(app: tauri::AppHandle) -> HostCapabilities {
     capabilities.os_version = macos_product_version();
     capabilities.arch = Some(std::env::consts::ARCH.to_owned());
     capabilities.candidate_panel_limit = linux_candidate_panel_limit();
+    if linux_native_canvas_renderer() {
+        capabilities.apply_linux_native_canvas();
+    }
     fill_linux_environment(&mut capabilities);
     let host_options = app
         .try_state::<DictionaryHostOptions>()
@@ -279,6 +289,23 @@ pub(crate) fn host_edition(
         Some(document) => msime_client_core::edition::Edition::of_host_options(&document),
         None => Some(msime_client_core::edition::Edition::full()),
     }
+}
+
+/// 背单词内置词书的资源根，`wordbooks/` 在它下面（`builtin::directory`）：放着 Engine 资源目录的那一层，不是资源目录本身。
+///
+/// Linux 的 Engine 资源装在 `share/<client>/resources`，不在 `resource_dir()`（`<prefix>/lib/<productName>`，安装时从不创建）下，所以按 HostOptions 求随包资源的目录（`msime_host_api::bundled_resource_root`：`resources` 的上一级，词库在线更新后是原安装包目录的上一级），词书装在那里的 `share/<client>/wordbooks`（platforms/linux/CMakeLists.txt）。Android 合包同理：`resource_dir()` 是 `asset://localhost/`，不是真实目录，HostOptions（`files/runtime-options.json`）的 `resources` 是 `files/bootstrap/resources`，Bootstrap 把词书解到它的同级 `files/bootstrap/wordbooks`，与原生背单词页读的是同一处。每次命令时现读：首次运行时这份文档还没写好。读不到时退回 `fallback`，那里没有词书，页面只列导入的词表。其余平台用 `fallback`，即 `VocabularyState` 里的 `resource_dir()`。
+fn vocabulary_resources(app: &tauri::AppHandle, fallback: &std::path::Path) -> PathBuf {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(root) = app
+        .try_state::<DictionaryHostOptions>()
+        .and_then(|options| options.snapshot().ok())
+        .and_then(|document| msime_host_api::bundled_resource_root(&document))
+    {
+        return root;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = app;
+    fallback.to_path_buf()
 }
 
 /// Cantonese, Zhuyin and Stroke each read a dictionary the package installs beside the Engine resources, which the HostOptions document names in `language_dictionaries` only when one is there. Without its dictionary host-api falls back from the scheme, so the page shows it unavailable instead of offering a choice that never takes effect. Every other scheme needs nothing beyond the resources.
@@ -344,6 +371,19 @@ fn linux_candidate_panel_limit() -> Option<msime_client_core::host_surface::Cand
     msime_client_core::host_surface::CandidatePanelLimit::from_host_status(
         &linux_candidate_panel_status_document()?,
     )
+}
+
+/// Fcitx5 宿主报告它在 X11 会话里用原生画布画候选窗（状态文件的 `"renderer": "native_canvas"`）；这时设置页也给展开候选、拼音字号和选中外观。
+#[cfg(target_os = "linux")]
+fn linux_native_canvas_renderer() -> bool {
+    linux_candidate_panel_status_document()
+        .as_deref()
+        .is_some_and(msime_client_core::host_surface::linux_native_canvas_renderer)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_native_canvas_renderer() -> bool {
+    false
 }
 
 /// 运行中的 Linux 宿主写的候选面板状态文件（`{"host": ..., "limit": ...}`）的内容；宿主没在运行或还没写过时为 `None`。
@@ -692,16 +732,16 @@ async fn open_directory(root: PathBuf) -> Result<(), CommandError> {
         .map_err(|code| CommandError { code })
 }
 
-/// What the settings page's diagnostic-log action should show: the log file itself where the platform can select a file in its file manager and the file exists, otherwise the directory that will hold it.
+/// 设置页的诊断日志动作要显示什么：平台的文件管理器能选中文件且文件已存在时是日志文件本身，否则是将来存放它的目录。
 #[derive(Debug, PartialEq, Eq)]
 enum DiagnosticLogTarget {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     File(PathBuf),
     Directory(PathBuf),
 }
 
 fn diagnostic_log_target(directory: &std::path::Path) -> DiagnosticLogTarget {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let file = directory.join("diagnostic.log");
         if file.is_file() {
@@ -724,9 +764,43 @@ fn reveal_file_in_finder(file: &std::path::Path) -> Result<(), &'static str> {
     status.success().then_some(()).ok_or("storage")
 }
 
-/// Reveal the input method's diagnostic log so it can be sent after a reproduction.
+/// `org.freedesktop.FileManager1.ShowItems` 的参数：只含这一个文件 URI 的 GVariant 字符串数组。URI 经百分号编码后仍可能带单引号，按 GVariant 文本格式转义单引号和反斜杠。
+#[cfg(any(target_os = "linux", test))]
+fn file_manager_show_items_argument(uri: &str) -> String {
+    let escaped = uri.replace('\\', "\\\\").replace('\'', "\\'");
+    format!("['{escaped}']")
+}
+
+/// 在文件管理器里选中诊断日志：先走桌面通用的 `org.freedesktop.FileManager1.ShowItems`（Nautilus、Dolphin、Nemo、Thunar 等都实现了它），没有会话总线、没有实现它的文件管理器或 `gdbus` 不在时，退回用 `xdg-open` 打开它所在的目录。
+#[cfg(target_os = "linux")]
+fn reveal_file_in_file_manager(file: &std::path::Path) -> Result<(), &'static str> {
+    let shown = tauri::Url::from_file_path(file).is_ok_and(|uri| {
+        linux_process::run_status(
+            "gdbus",
+            &[
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.FileManager1",
+                "--object-path",
+                "/org/freedesktop/FileManager1",
+                "--method",
+                "org.freedesktop.FileManager1.ShowItems",
+                &file_manager_show_items_argument(uri.as_str()),
+                "",
+            ],
+            std::time::Duration::from_secs(3),
+        )
+    });
+    if shown {
+        return Ok(());
+    }
+    skin_directory::open(file.parent().ok_or("storage")?)
+}
+
+/// 显示输入法的诊断日志，方便复现问题后发送。
 ///
-/// MSIME-Windows writes its log to the Desktop to make it easy to find; on macOS the file stays in the preferences directory under Application Support and this action selects it in Finder instead. The host picks the location - the webview cannot name one.
+/// MSIME-Windows 把日志写到桌面上便于找到；macOS 上文件留在应用支持目录下的偏好目录里，这个动作在访达中选中它；Linux 上同样在文件管理器里选中数据目录中的 diagnostic.log（见 `reveal_file_in_file_manager`）。位置由宿主决定，网页不能指定。
 #[tauri::command]
 async fn open_diagnostic_log_directory(
     state: tauri::State<'_, DiagnosticLogState>,
@@ -735,7 +809,9 @@ async fn open_diagnostic_log_directory(
     tauri::async_runtime::spawn_blocking(move || match diagnostic_log_target(&directory) {
         #[cfg(target_os = "macos")]
         DiagnosticLogTarget::File(file) => reveal_file_in_finder(&file),
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        DiagnosticLogTarget::File(file) => reveal_file_in_file_manager(&file),
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         DiagnosticLogTarget::File(_) => Err("unavailable"),
         DiagnosticLogTarget::Directory(root) => skin_directory::open(&root),
     })
@@ -1003,6 +1079,75 @@ fn rescan_skin_catalog(root: PathBuf, runtime: &RuntimeOptionsState) -> SkinCata
     #[cfg(not(target_os = "linux"))]
     let _ = runtime;
     response
+}
+
+/// 「制作皮肤」的草稿：页面只交出文件夹名、`skin.toml` 全文和图片，规则全在 `skin::candidate_editor`。
+fn candidate_skin_draft(
+    package_id: String,
+    manifest: String,
+    files: std::collections::BTreeMap<String, String>,
+) -> msime_client_services::skin::candidate_editor::CandidateSkinDraft {
+    msime_client_services::skin::candidate_editor::CandidateSkinDraft {
+        package_id,
+        manifest,
+        files,
+    }
+}
+
+/// 不写皮肤目录，按目录扫描的规则读一遍草稿：页面用它取一个基底外观补齐后的配色。
+#[tauri::command]
+async fn candidate_skin_check(
+    package_id: String,
+    manifest: String,
+    files: std::collections::BTreeMap<String, String>,
+) -> Result<
+    msime_client_services::skin::catalog::SkinSummary,
+    msime_client_services::skin::candidate_editor::CandidateSkinFailure,
+> {
+    use msime_client_services::skin::candidate_editor::{self, CandidateSkinFailure};
+    let draft = candidate_skin_draft(package_id, manifest, files);
+    tauri::async_runtime::spawn_blocking(move || candidate_editor::check(&draft))
+        .await
+        .map_err(|_| CandidateSkinFailure::code("storage"))?
+}
+
+/// 把草稿装进宿主的皮肤根目录并重扫，Linux 上重扫也把新目录发布给 IBus 和 Fcitx5 宿主。
+fn create_candidate_skin_at(
+    root: PathBuf,
+    runtime: &RuntimeOptionsState,
+    draft: &msime_client_services::skin::candidate_editor::CandidateSkinDraft,
+    replace: bool,
+) -> Result<
+    msime_client_services::skin::candidate_editor::CreatedCandidateSkin,
+    msime_client_services::skin::candidate_editor::CandidateSkinFailure,
+> {
+    let created = msime_client_services::skin::candidate_editor::create(&root, draft, replace)?;
+    rescan_skin_catalog(root, runtime);
+    Ok(created)
+}
+
+#[tauri::command]
+async fn candidate_skin_create(
+    directory: tauri::State<'_, SkinDirectoryState>,
+    runtime: tauri::State<'_, RuntimeOptionsState>,
+    package_id: String,
+    manifest: String,
+    files: std::collections::BTreeMap<String, String>,
+    replace: bool,
+) -> Result<
+    msime_client_services::skin::candidate_editor::CreatedCandidateSkin,
+    msime_client_services::skin::candidate_editor::CandidateSkinFailure,
+> {
+    use msime_client_services::skin::candidate_editor::CandidateSkinFailure;
+    // 根目录由宿主决定，页面只给文件夹名。
+    let root = directory.0.clone();
+    let runtime = runtime.inner().clone();
+    let draft = candidate_skin_draft(package_id, manifest, files);
+    tauri::async_runtime::spawn_blocking(move || {
+        create_candidate_skin_at(root, &runtime, &draft, replace)
+    })
+    .await
+    .map_err(|_| CandidateSkinFailure::code("storage"))?
 }
 
 /// Discover the helper-code tables shipped beside the Engine's verified resources. The WebView
@@ -1825,10 +1970,12 @@ fn sync_runtime_options(
         current["preferences"] = host_preferences;
         #[cfg(target_os = "linux")]
         let bytes = match &catalog {
-            Some((root, catalog)) => {
-                runtime_options_with_skin_catalog(&mut current, root, catalog)?
-            }
-            None => linux_runtime_options_bytes(&current)?,
+            Some((root, catalog)) => linux_runtime_options::runtime_options_with_skin_catalog(
+                &mut current,
+                root,
+                catalog,
+            )?,
+            None => linux_runtime_options::runtime_options_bytes(&current)?,
         };
         #[cfg(target_os = "android")]
         let bytes = serde_json::to_vec_pretty(&current)
@@ -1843,74 +1990,15 @@ fn sync_runtime_options(
     Ok(())
 }
 
-/// The most runtime-options.json may hold. The IBus launcher, the Fcitx5 addon and `msime_host_api::refresh_host_options` all read at most 16 KiB and keep their previous configuration (IBus) or fail (Fcitx5, the upgrade refresh) on anything longer.
+// 宿主读的上限、皮肤目录的裁剪和「没变就不写」与 MCP 服务共用 `skin::linux_runtime_options`，这里只做文件读写。
 #[cfg(target_os = "linux")]
-const LINUX_RUNTIME_OPTIONS_LIMIT: usize = 16384;
+use msime_client_services::skin::linux_runtime_options;
 
-/// How large the skin catalog may let runtime-options.json grow: the last 1 KiB of `LINUX_RUNTIME_OPTIONS_LIMIT` is left for the upgrade refresh, which rewrites the resource and dictionary paths and appends a newline without knowing about the catalog.
 #[cfg(target_os = "linux")]
-const LINUX_RUNTIME_OPTIONS_CATALOG_BUDGET: usize = LINUX_RUNTIME_OPTIONS_LIMIT - 1024;
-
-/// Serialize `document` as the Linux hosts will read it, refusing one longer than they read so that a save never replaces a working file with one that stops both hosts.
-#[cfg(target_os = "linux")]
-fn linux_runtime_options_bytes(document: &Value) -> Result<Vec<u8>, RuntimeOptionsError> {
-    let bytes = serde_json::to_vec_pretty(document)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    if bytes.len() > LINUX_RUNTIME_OPTIONS_LIMIT {
-        return Err(RuntimeOptionsError::TooLarge);
+impl From<linux_runtime_options::TooLarge> for RuntimeOptionsError {
+    fn from(_: linux_runtime_options::TooLarge) -> Self {
+        Self::TooLarge
     }
-    Ok(bytes)
-}
-
-/// 把 `document` 连同从 `root` 扫描到的已安装皮肤一起序列化，皮肤目录写在 `candidate_skin_catalog` 里；放不进 `LINUX_RUNTIME_OPTIONS_CATALOG_BUDGET` 时从末尾逐个丢掉皮肤包，直到放得下。
-///
-/// 自定义主题选中的皮肤（浅色、深色两个槽位）最后才丢，因为屏幕上画的是它们的颜色。连空目录都放不下时整个键不写，免得宿主原本能读的文档因为皮肤目录读不了；去掉目录后仍超出宿主上限的文档直接拒绝。
-#[cfg(target_os = "linux")]
-fn runtime_options_with_skin_catalog(
-    document: &mut Value,
-    root: &std::path::Path,
-    catalog: &msime_client_services::skin::catalog::SkinCatalog,
-) -> Result<Vec<u8>, RuntimeOptionsError> {
-    let serialize = |document: &Value| {
-        serde_json::to_vec_pretty(document)
-            .map_err(|error| std::io::Error::other(error.to_string()))
-    };
-    let custom_theme = &document["preferences"]["custom_theme"];
-    let selected: Vec<String> = ["candidate_skin", "candidate_skin_dark"]
-        .into_iter()
-        .filter_map(|slot| custom_theme[slot].as_str())
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned)
-        .collect();
-    let selected: Vec<&str> = selected.iter().map(String::as_str).collect();
-    let mut published =
-        msime_client_services::skin::catalog::host_candidate_catalog(catalog, root, &selected);
-    loop {
-        document["candidate_skin_catalog"] = published.clone();
-        let bytes = serialize(document)?;
-        if bytes.len() <= LINUX_RUNTIME_OPTIONS_CATALOG_BUDGET {
-            return Ok(bytes);
-        }
-        let Some(packages) = published["packages"].as_array_mut() else {
-            break;
-        };
-        if packages.is_empty() {
-            break;
-        }
-        let dropped = packages
-            .iter()
-            .rposition(|package| {
-                !package["id"]
-                    .as_str()
-                    .is_some_and(|id| selected.contains(&id))
-            })
-            .unwrap_or(packages.len() - 1);
-        packages.remove(dropped);
-    }
-    if let Some(object) = document.as_object_mut() {
-        object.remove("candidate_skin_catalog");
-    }
-    linux_runtime_options_bytes(document)
 }
 
 /// Write a freshly scanned catalog into the runtime options the Linux hosts read, leaving every other key as it is on disk. Before setup there is no document to publish into, which is not an error.
@@ -1931,10 +2019,9 @@ fn publish_candidate_skin_catalog(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let unchanged = current.get("candidate_skin_catalog").cloned();
-    let bytes = runtime_options_with_skin_catalog(&mut current, root, catalog)?;
     // A rescan that finds what was already published leaves the file alone, so the hosts watching it do not reload for nothing.
-    if current.get("candidate_skin_catalog") != unchanged.as_ref() {
+    if let Some(bytes) = linux_runtime_options::republish_skin_catalog(&mut current, root, catalog)?
+    {
         shared::atomic_file::write(path, &bytes)?;
     }
     *document = current;
@@ -2339,22 +2426,11 @@ async fn cloud_dictionary_request(
             return Ok(result);
         }
     }
-    // macOS 的设置进程没有原生会话时，复用输入法也读写的账号文件与刷新锁；已有 provider 的失败不重发。
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let document = options.snapshot()?;
-        let account = app.state::<desktop_account::AccountState>();
-        let snapshots = app.state::<desktop_cloud_dictionary::CloudDictionaryState>();
-        desktop_cloud_dictionary::request(&account.session, snapshots.inner(), document, request)
-            .await
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = request;
-        Err(CommandError {
-            code: "unavailable",
-        })
-    }
+    // macOS 的设置进程没有原生会话时、Linux 没有配置或发现 provider socket 时，复用输入法也读写的账号文件与刷新锁；已有 provider 的失败不重发。
+    let document = options.snapshot()?;
+    let account = app.state::<desktop_account::AccountState>();
+    let snapshots = app.state::<desktop_cloud_dictionary::CloudDictionaryState>();
+    desktop_cloud_dictionary::request(&account.session, snapshots.inner(), document, request).await
 }
 
 #[cfg(target_os = "ios")]
@@ -3738,6 +3814,9 @@ fn activate_desktop_surface(app: &tauri::AppHandle, route: SurfaceRoute) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+    // 只为面板启动过的设置进程，这时才第一次打开设置窗口；常驻的设置进程也在每次被叫到前台时看一眼是否又满一天。
+    #[cfg(target_os = "linux")]
+    update_check::start_linux_background_update_check(app);
     let page = route
         .settings_category()
         .map(|category| category.as_str())
@@ -5187,16 +5266,7 @@ pub fn run() {
             app.manage(TypingStatisticsState(TypingStatisticsStore::new(&directory)));
             app.manage(DiagnosticLogState(directory.clone()));
             app.manage(notices::NoticesState(directory.clone()));
-            // The staging root, not the Engine resource directory inside it: `wordbooks/` is a
-            // sibling of `EngineResources/` because `ResourceStore::verify` requires that
-            // directory to hold exactly the pinned dictionary artifacts, and one extra entry
-            // would break the check whose job is to prove a shipped dictionary is intact. A host
-            // that stages no books simply offers the imported ones.
-            // The staging root, not the Engine resource directory inside it: `wordbooks/` is a
-            // sibling of `EngineResources/` because `ResourceStore::verify` requires that
-            // directory to hold exactly the pinned dictionary artifacts, and one extra entry
-            // would break the check whose job is to prove a shipped dictionary is intact. A host
-            // that stages no books simply offers the imported ones.
+            // The staging root, not the Engine resource directory inside it: `wordbooks/` is a sibling of `EngineResources/` because `ResourceStore::verify` requires that directory to hold exactly the pinned dictionary artifacts, and one extra entry would break the check whose job is to prove a shipped dictionary is intact. A host that stages no books simply offers the imported ones. Linux 和 Android 的资源不在这里，见 `vocabulary_resources`。
             app.manage(VocabularyState(
                 directory.clone(),
                 app.path()
@@ -5221,7 +5291,20 @@ pub fn run() {
                 directory.join("clipboard_history.json"),
             );
             #[cfg(target_os = "linux")]
-            start_linux_clipboard_monitor(Arc::clone(&clipboard_state.0), preferences);
+            {
+                let capture = clipboard_history::ClipboardCaptureState::default();
+                app.manage(capture.clone());
+                let emitter = app.handle().clone();
+                // 采集状态变了就发一次剪贴板变化通知，开着的剪贴板面板随之重读列表和状态行。
+                start_linux_clipboard_monitor(
+                    Arc::clone(&clipboard_state.0),
+                    preferences,
+                    capture,
+                    move || {
+                        let _ = emitter.emit("clipboard-history-changed", ());
+                    },
+                );
+            }
             #[cfg(target_os = "windows")]
             msime_host_windows::start_clipboard_monitor({
                 let preferences = preferences.clone();
@@ -5426,6 +5509,26 @@ pub fn run() {
                 #[cfg(not(any(target_os = "linux", target_os = "android")))]
                 document: Arc::new(host_document.clone()),
             });
+            // 这次启动打开的是设置窗口，不是某个面板（屏幕键盘、表情、剪贴板等由输入法按需拉起）。
+            #[cfg(target_os = "linux")]
+            let settings_launch = requested_surface_route()
+                .and_then(|route| route.panel_for(host_platform()))
+                .is_none();
+            // 每天一次的后台更新检查（只提醒，不在应用里安装），见 `update_check` 里 Linux 后台检查一节。只在打开设置窗口时检查（这里是启动时，另见 `activate_desktop_surface`），面板启动不联网。
+            #[cfg(target_os = "linux")]
+            {
+                app.manage(update_check::BackgroundUpdateState::new(&directory));
+                if settings_launch {
+                    update_check::start_linux_background_update_check(app.handle());
+                }
+            }
+            // 与 macOS 的首次安装窗口一样：还没配置（或宿主报告词库过期）时设置窗口先以居中的小窗口打开首次配置页。面板启动不碰主窗口。
+            #[cfg(target_os = "linux")]
+            if settings_launch && linux_setup::setup_window_pending(runtime_path.as_deref()) {
+                if let Some(main) = app.get_webview_window("main") {
+                    linux_setup::shape_setup_window(&main);
+                }
+            }
             app.manage(RuntimeOptionsState {
                 path: runtime_path,
                 document: Arc::new(Mutex::new(host_document)),
@@ -5499,6 +5602,7 @@ pub fn run() {
             update_check::update_check,
             update_check::application_update_supported,
             update_check::application_update_check,
+            update_check::pending_update_check,
             list_voice_capture_devices,
             capture_voice_pcm,
             supports_font_catalog,
@@ -5575,6 +5679,8 @@ pub fn run() {
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             install_mcp_client,
             scan_skin_catalog,
+            candidate_skin_check,
+            candidate_skin_create,
             list_helpcode_schemas,
             resolve_theme,
             validate_shuangpin_custom_profile,
@@ -5602,6 +5708,8 @@ pub fn run() {
             linux_provider_credentials::clear_voice_provider_credential,
             save_preferences,
             clipboard_history::list_clipboard_history,
+            #[cfg(target_os = "linux")]
+            clipboard_history::clipboard_capture_status,
             clipboard_history::clear_clipboard_history,
             clipboard_history::remove_clipboard_history,
             clipboard_history::set_clipboard_history_pinned,
@@ -5698,6 +5806,12 @@ pub fn run() {
             linux_setup::linux_setup_status,
             #[cfg(target_os = "linux")]
             linux_setup::run_linux_setup,
+            #[cfg(target_os = "linux")]
+            linux_setup::run_linux_dictionary_update,
+            #[cfg(target_os = "linux")]
+            linux_setup::leave_linux_setup_window,
+            #[cfg(target_os = "linux")]
+            linux_setup::open_fcitx5_configtool,
             #[cfg(target_os = "android")]
             android_account::android_open_input_method_settings,
             #[cfg(target_os = "android")]
@@ -5758,14 +5872,14 @@ pub fn run() {
             android_account::account_forget,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             desktop_account::account_forget,
-            #[cfg(target_os = "windows")]
-            windows_settings_sync::account_preferences_schema,
-            #[cfg(target_os = "windows")]
-            windows_settings_sync::account_preferences_load,
-            #[cfg(target_os = "windows")]
-            windows_settings_sync::account_preferences_upload,
-            #[cfg(target_os = "windows")]
-            windows_settings_sync::account_preferences_apply,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            desktop_settings_sync::account_preferences_schema,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            desktop_settings_sync::account_preferences_load,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            desktop_settings_sync::account_preferences_upload,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            desktop_settings_sync::account_preferences_apply,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             desktop_candidate_skin_community::candidate_skin_community_list,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -5900,19 +6014,54 @@ pub fn run() {
             mobile_community::ai_skin_generate,
             #[cfg(any(target_os = "ios", target_os = "android"))]
             mobile_community::ai_skin_cancel,
-            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            #[cfg(any(
+                target_os = "ios",
+                target_os = "android",
+                target_os = "windows",
+                target_os = "linux"
+            ))]
             community_resources::community_resource_list,
-            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            #[cfg(any(
+                target_os = "ios",
+                target_os = "android",
+                target_os = "windows",
+                target_os = "linux"
+            ))]
             community_resources::community_resource_detail,
-            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            #[cfg(any(
+                target_os = "ios",
+                target_os = "android",
+                target_os = "windows",
+                target_os = "linux"
+            ))]
             community_resources::community_resource_publish,
-            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            #[cfg(any(
+                target_os = "ios",
+                target_os = "android",
+                target_os = "windows",
+                target_os = "linux"
+            ))]
             community_resources::community_resource_apply,
-            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            #[cfg(any(
+                target_os = "ios",
+                target_os = "android",
+                target_os = "windows",
+                target_os = "linux"
+            ))]
             community_resources::community_resource_save,
-            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            #[cfg(any(
+                target_os = "ios",
+                target_os = "android",
+                target_os = "windows",
+                target_os = "linux"
+            ))]
             community_resources::community_resource_rate,
-            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            #[cfg(any(
+                target_os = "ios",
+                target_os = "android",
+                target_os = "windows",
+                target_os = "linux"
+            ))]
             community_resources::community_resource_unpublish,
             #[cfg(any(target_os = "ios", target_os = "android"))]
             mobile_community::community_resource_store_reply,

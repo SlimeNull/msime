@@ -18,7 +18,7 @@ use crate::types::{
     SentenceAssociationOptions, ShuangpinCustomTable, ShuangpinProfileKind, WubiInputOptions,
     WubiProfileKind, DEFAULT_FIRST_PAGE_ROWS,
 };
-use crate::user_dictionary::generation::prepare_runtime_paths_for;
+use crate::user_dictionary::generation::{merge_downloaded_wubi, prepare_runtime_paths_for};
 use crate::vietnamese::{InputMethod as VietnameseInputMethod, ToneStyle as VietnameseToneStyle};
 
 const MAX_TRANSLATION_SIDECAR_BYTES: u64 = 1024 * 1024;
@@ -80,6 +80,8 @@ pub struct EngineOptions {
     pub helpcode_schema: String,
     /// 宿主给的辅助码表（已安装的辅助码表插件）；有它时 Engine 直接用它，`helpcode_schema` 只用来校验和作为回退。
     pub helpcode_table: Option<SharedKeymap>,
+    /// 主资源缺少内置辅助码表时，从宿主指定的随包资源根目录读取；自定义表不回退。
+    pub helpcode_fallback_resources: Option<String>,
     pub chinese_punctuation: bool,
     pub paired_punctuation: bool,
     pub punctuation_lock: u8,
@@ -148,6 +150,8 @@ pub struct EngineOptions {
     pub stroke_dictionary: String,
     /// `msime-japanese.dat` 的绝对路径；为空时从资源目录读取。
     pub japanese_dictionary: String,
+    /// `msime-wubi.db` 的绝对路径；为空时用资源目录里的那份。资源目录不带它（macOS 发布包把它改为按需下载）时，宿主把另行下载的那份交到这里，建会话时并进代次的工作主词库（`user_dictionary::generation::merge_downloaded_wubi`）。
+    pub wubi_dictionary: String,
 }
 
 /// Stage the generation (`prepare_runtime_paths`) and fill the product defaults: quanpin, xiaohe, Telex with modern tone placement and no language dictionaries, learning off, autocorrect and fuzzy off, helpcode on with `ziranma`, frequency `promote` 1/1, mixed English from 5 letters, every Shift+letter local mode of the reference on and the expression, command and mention modes off with empty tables, and explicit values for the fields the C++ left default-initialised (`shuangpin_preedit_uses_raw = true`, `wubi_mixed_pinyin = false`, `sentence_association` default, `sentence_alternatives = false`).
@@ -198,6 +202,7 @@ pub fn prepare_options_for(
         show_helpcode: true,
         helpcode_schema: "ziranma".to_owned(),
         helpcode_table: None,
+        helpcode_fallback_resources: None,
         chinese_punctuation: true,
         paired_punctuation: true,
         punctuation_lock: 0,
@@ -241,12 +246,21 @@ pub fn prepare_options_for(
         zhuyin_dictionary: String::new(),
         stroke_dictionary: String::new(),
         japanese_dictionary: String::new(),
+        wubi_dictionary: String::new(),
     })
 }
 
 /// `options_for`: map and validate (`UNSUPPORTED_INPUT_SCHEME`, `UNSUPPORTED_SHUANGPIN_PROFILE`, `UNSUPPORTED_WUBI_PROFILE`, `UNSUPPORTED_FREQUENCY_MODE`, `UNSUPPORTED_VIETNAMESE_METHOD`, `UNSUPPORTED_VIETNAMESE_TONE_STYLE`), and refresh the translations sidecar in the generation directory.
 pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     prepare_translation_sidecar(options)?;
+    // 并不进来只是五笔还没有码表可读，不该让整个会话建不起来：记下来，下次建会话再试。
+    if !options.wubi_dictionary.is_empty() {
+        if let Err(error) =
+            merge_downloaded_wubi(&runtime_paths(options), Path::new(&options.wubi_dictionary))
+        {
+            eprintln!("msime: downloaded wubi tables not merged into the generation: {error}");
+        }
+    }
     let scheme = SchemeType::from_u8(options.scheme)
         .ok_or_else(|| EngineError::invalid(diagnostics::UNSUPPORTED_INPUT_SCHEME))?;
     let shuangpin_profile = shuangpin_profile(options)?;
@@ -309,6 +323,10 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.helpcode = options.helpcode;
     session.helpcode_schema = options.helpcode_schema.clone();
     session.helpcode_table = options.helpcode_table.clone();
+    session.helpcode_fallback_resources = options
+        .helpcode_fallback_resources
+        .as_ref()
+        .map(PathBuf::from);
     session.frequency = FrequencyAdjustmentOptions {
         mode,
         trigger_count: i32::from(options.frequency_trigger_count),

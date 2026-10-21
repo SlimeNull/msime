@@ -21,6 +21,7 @@ import type { FontCatalogReader } from "../candidate/font-catalog";
 import type { ResolveThemeRequest, ResolvedTheme } from "../theme/global-theme";
 import type { AiSkinClient, CustomSkinLibraryClient } from "../keyboard/touch-keyboard-skin-design";
 import type { SkinCatalog } from "../skin/external-skins";
+import type { CandidateSkinEditorClient } from "../skin/candidate-skin-draft";
 import type { TypingStatisticsClient } from "../settings/typing-statistics-model";
 import type { VocabularyReviewClient } from "../settings/vocabulary-review";
 import type {
@@ -80,6 +81,8 @@ export interface SettingsClient {
   listFontFamilies?: FontCatalogReader;
   resolveFontFamilies?: (names: string[]) => Promise<string[]>;
   scanSkinCatalog?: () => Promise<SkinCatalog>;
+  /** 「制作皮肤」的宿主一侧：按皮肤目录的规则读一份清单，或把编辑器做的皮肤经共享安装器装进本机皮肤目录。还要 `host.candidate_skin_editor` 为真，标签才出现。 */
+  candidateSkinEditor?: CandidateSkinEditorClient;
   /** 宿主在已验证的资源目录中发现的自定义辅助码表。 */
   listHelpcodeSchemas?: () => Promise<CustomHelpcodeSchema[]>;
   /** 宿主用输入法相同的 `resolve`（`msime_client_resolve_theme`）解析主题颜色，并从自己的皮肤目录读取自定义主题包。桥接没有主题调用时不提供；选择器与内置预览读取 `themeCatalog`，不需要宿主。 */
@@ -121,6 +124,8 @@ export interface SettingsClient {
   checkForApplicationUpdate?: () => Promise<void>;
   /** 经由 `msime_client_services::update_check`（Tauri 的 `update_check` 命令，或原生宿主上的 `msime_client_update_check`）把本平台、本版本最新的已发布版本与当前运行的版本号比较。未提供时关于页不提供检查更新。 */
   checkUpdate?: (request: UpdateCheckRequest) => Promise<UpdateCheckResult>;
+  /** 宿主在后台已经找到的新版本（Linux 设置应用每天一次的后台检查），关于页打开时直接显示；没有时为 `null`。 */
+  pendingUpdateCheck?: () => Promise<UpdateCheckResult | null>;
   openExternalUrl?: (url: string) => Promise<void>;
   /** 控制台应用通知；宿主读取并缓存通知，记住已关闭的条目。未提供时不显示。 */
   notices?: NoticesClient;

@@ -18,6 +18,8 @@ add_test(NAME voice-provider-socket COMMAND voice-provider-socket-test)
 add_executable(input-mode-hud-panel-test tests/input/InputModeHUDPanelTest.mm src/input/InputModeHUDPanel.mm)
 target_compile_options(input-mode-hud-panel-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(input-mode-hud-panel-test PRIVATE "-framework AppKit")
+# InputModeHUDPanel.mm 经 CandidatePlacement.h 引入 shared/candidate（嵌套命名空间、std::optional），这个目标定义在下面统一设置 C++17 之前，所以单独指定。
+set_target_properties(input-mode-hud-panel-test PROPERTIES OBJCXX_STANDARD 17)
 add_test(NAME input-mode-hud-panel COMMAND input-mode-hud-panel-test)
 # The selected input mode (中, 英, 日 or 한) follows the controller's state; this checks the mapping to the plist's mode identifiers and that a switch made by either side is not echoed back by the other.
 add_executable(input-mode-identifiers-test tests/input/InputModeIdentifiersTest.mm)
@@ -154,6 +156,9 @@ if(NOT MSIME_MACOS_VERSION MATCHES "^([0-9]+)\\.([0-9][0-9]?[0-9]?)\\.([0-9][0-9
 endif()
 math(EXPR MACOSX_BUNDLE_BUNDLE_VERSION "((${CMAKE_MATCH_1} * 1000 + ${CMAKE_MATCH_2}) * 1000 + ${CMAKE_MATCH_3}) * 1000 + ${MSIME_BUILD_NUMBER}")
 message(STATUS "Bundle build number: ${MACOSX_BUNDLE_BUNDLE_VERSION}")
+# version.txt is the only place the version is written: Info.plist.in takes CFBundleShortVersionString from this variable, and the sources that need a fallback for an unbundled executable read MSIME_MACOS_VERSION_STRING, so a release bumps version.txt (and build-number.txt) and nothing else.
+set(MACOSX_BUNDLE_SHORT_VERSION_STRING "${MSIME_MACOS_VERSION}")
+add_compile_definitions(MSIME_MACOS_VERSION_STRING="${MSIME_MACOS_VERSION}")
 # 版本（edition）是 shared/contracts/editions.json 里的 id。full 用 Info.plist.in 和 resources/<语言>.lproj/InfoPlist.strings 原样构建，产物与引入版本之前相同；其他版本由 scripts/edition_bundle.py 在配置时从同样的模板生成该版本的 Info.plist 和 InfoPlist.strings（bundle id、模式、版本键），可执行文件也改成该版本的名字。原生代码在运行时从 Info.plist 读版本身份（src/core/EditionIdentity.h），所以除了这几个文件，各版本编出来的东西完全一样；发布包只编 full，再用同一个脚本把 bundle 改成各个版本（package-release.sh）。
 set(MSIME_EDITION "full" CACHE STRING "Edition id from shared/contracts/editions.json")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -261,6 +266,13 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../shared/voice/third_party/cppco
 file(GLOB MSIME_LEGAL_RESOURCES CONFIGURE_DEPENDS "${MSIME_LEGAL_DIRECTORY}/*")
 target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_LEGAL_RESOURCES})
 set_source_files_properties(${MSIME_LEGAL_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/Licenses")
+# 输入法独立安装后也能读取内置辅助码，不依赖旧配置或下载词库目录里是否含有这些表。
+set(MSIME_HELPCODE_RESOURCES "")
+foreach(MSIME_HELPCODE_FILE helpcode.txt zrm_helpcode_big_unique.txt shouyou2_0_helpcode.txt shouyouplus_helpcode.txt xiaohe_helpcode.txt jiajia_helpcode.txt wubi86_helpcode.txt)
+  list(APPEND MSIME_HELPCODE_RESOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/${MSIME_HELPCODE_FILE}")
+endforeach()
+target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_HELPCODE_RESOURCES})
+set_source_files_properties(${MSIME_HELPCODE_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/helpcodes")
 # The Dock takes its label from the bundle's filename — not CFBundleDisplayName, CFBundleName or a
 # localized InfoPlist.strings, all of which it ignores here. Naming the product is the only lever.
 set_target_properties(MSIMEClientInputMethod PROPERTIES OUTPUT_NAME "${MSIME_INPUT_METHOD_NAME}")
@@ -351,17 +363,27 @@ add_custom_command(OUTPUT "${MSIME_VOICE_RUNTIME_STAMP}"
   COMMENT "Fetching the pinned sherpa-onnx runtime for on-device speech recognition"
   VERBATIM)
 add_custom_target(macos-voice-runtime DEPENDS "${MSIME_VOICE_RUNTIME_STAMP}")
-add_dependencies(MSIMEClientInputMethod macos-voice-runtime msime-voice-local)
-# 上游的 sherpa-onnx 运行库是 x86_64 + arm64 的通用二进制（约 55 MB）。拷进 bundle 时只抽出 MSIME_BUNDLE_ARCHITECTURES 里的架构：universal 包两种都留，开发构建只编宿主架构时省下另一半。lipo 会破坏上游签名，install.sh 和 package-release.sh 之后都会用 --deep 重新签名整个 bundle。
-set(MSIME_VOICE_RUNTIME_EXTRACT)
-foreach(MSIME_BUNDLE_ARCHITECTURE IN LISTS MSIME_BUNDLE_ARCHITECTURES)
-  list(APPEND MSIME_VOICE_RUNTIME_EXTRACT -extract "${MSIME_BUNDLE_ARCHITECTURE}")
-endforeach()
+# 发布包在 resources/voice-runtime-macos.lock.json 固定了重签的运行库、并且用同一个 Team ID 签名时关掉它（package-release.sh）：运行库不进 bundle，由设置应用作为 voice-runtime-macos 资源包下载，输入法以 --runtime 交给辅助进程（src/voice/LocalVoiceRequest.h）。开发构建照旧内置，签名身份不同的开发者也能直接用本地识别。
+option(MSIME_BUNDLE_VOICE_RUNTIME "Stage the sherpa-onnx runtime into Contents/Frameworks; off leaves it to the voice-runtime-macos resource pack" ON)
+add_dependencies(MSIMEClientInputMethod msime-voice-local)
 add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${MSIME_SWIFT_BACKEND_OUTPUT}" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/MSIMEBackend.dylib"
-  COMMAND lipo "${MSIME_VOICE_RUNTIME_LIBRARY}" ${MSIME_VOICE_RUNTIME_EXTRACT} -output "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/libsherpa-onnx-c-api.dylib"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:msime-voice-local>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/MacOS/msime-voice-local")
+if(MSIME_BUNDLE_VOICE_RUNTIME)
+  add_dependencies(MSIMEClientInputMethod macos-voice-runtime)
+  # 上游的 sherpa-onnx 运行库是 x86_64 + arm64 的通用二进制（约 55 MB）。拷进 bundle 时只抽出 MSIME_BUNDLE_ARCHITECTURES 里的架构：universal 包两种都留，开发构建只编宿主架构时省下另一半。lipo 会破坏上游签名，install.sh 和 package-release.sh 之后都会用 --deep 重新签名整个 bundle。
+  set(MSIME_VOICE_RUNTIME_EXTRACT)
+  foreach(MSIME_BUNDLE_ARCHITECTURE IN LISTS MSIME_BUNDLE_ARCHITECTURES)
+    list(APPEND MSIME_VOICE_RUNTIME_EXTRACT -extract "${MSIME_BUNDLE_ARCHITECTURE}")
+  endforeach()
+  add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
+    COMMAND lipo "${MSIME_VOICE_RUNTIME_LIBRARY}" ${MSIME_VOICE_RUNTIME_EXTRACT} -output "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/libsherpa-onnx-c-api.dylib")
+else()
+  # 关掉之后重新构建同一个构建目录时，上一次拷进去的运行库还在 bundle 里，删掉它。
+  add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/libsherpa-onnx-c-api.dylib")
+endif()
 set(MSIME_OPTIONS_FILE "" CACHE FILEPATH "Optional development runtime configuration; never distribute this file")
 if(MSIME_OPTIONS_FILE)
   target_sources(MSIMEClientInputMethod PRIVATE "${MSIME_OPTIONS_FILE}")
@@ -759,6 +781,10 @@ add_executable(local-mode-preferences-test tests/settings/LocalModePreferencesTe
 target_compile_options(local-mode-preferences-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(local-mode-preferences-test PRIVATE apple-client "-framework AppKit")
 add_test(NAME local-mode-preferences COMMAND local-mode-preferences-test)
+add_executable(skin-package-replace-test tests/candidate/SkinPackageReplaceTest.mm src/settings/AppearancePreferences.mm src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/candidate/CandidateSkinAppearance.mm)
+target_compile_options(skin-package-replace-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(skin-package-replace-test PRIVATE apple-client "-framework AppKit")
+add_test(NAME skin-package-replace COMMAND skin-package-replace-test)
 add_executable(wubi-auto-commit-preferences-test tests/settings/WubiAutoCommitPreferencesTest.mm src/settings/AppearancePreferences.mm src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/candidate/CandidateSkinAppearance.mm)
 target_compile_options(wubi-auto-commit-preferences-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(wubi-auto-commit-preferences-test PRIVATE apple-client "-framework AppKit")
@@ -1086,10 +1112,10 @@ target_compile_options(skin-preview-test PRIVATE -fobjc-arc -Wall -Wextra -Werro
 target_link_libraries(skin-preview-test PRIVATE "-framework AppKit" "-framework CoreText")
 add_test(NAME skin-preview COMMAND skin-preview-test)
 add_executable(skin-settings-test tests/candidate/SkinSettingsTest.mm src/settings/AppearancePreferences.mm src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/candidate/CandidateSkinAppearance.mm src/core/ChineseTextConversion.mm)
-foreach(translation_settings_consumer MSIMEClientInputMethod toolbar-visibility-preferences-test scheme-round-trip-preferences-test wubi-auto-commit-preferences-test local-mode-preferences-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
+foreach(translation_settings_consumer MSIMEClientInputMethod toolbar-visibility-preferences-test scheme-round-trip-preferences-test wubi-auto-commit-preferences-test local-mode-preferences-test skin-package-replace-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
   target_sources(${translation_settings_consumer} PRIVATE src/cloud/TranslationSettingsWindow.mm)
 endforeach()
-foreach(ai_settings_consumer toolbar-visibility-preferences-test scheme-round-trip-preferences-test wubi-auto-commit-preferences-test local-mode-preferences-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
+foreach(ai_settings_consumer toolbar-visibility-preferences-test scheme-round-trip-preferences-test wubi-auto-commit-preferences-test local-mode-preferences-test skin-package-replace-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
   target_sources(${ai_settings_consumer} PRIVATE src/core/AISettingsWindow.mm)
 endforeach()
 foreach(translation_settings_consumer toolbar-visibility-preferences-test scheme-round-trip-preferences-test skin-preview-test skin-settings-test)
@@ -1143,7 +1169,11 @@ add_test(
   COMMAND "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings/preference_coverage.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/../..")
-# 官方插件包随这次构建放进了 bundle 时，bundle-contents 逐个核对它们到位、内容和构建出的一致。
+# 官方插件包随这次构建放进了 bundle 时，bundle-contents 逐个核对它们到位、内容和构建出的一致。不内置语音运行库的构建，它核对运行库确实不在 bundle 里。
+set(MSIME_BUNDLE_VOICE_RUNTIME_ARGUMENTS "")
+if(NOT MSIME_BUNDLE_VOICE_RUNTIME)
+  set(MSIME_BUNDLE_VOICE_RUNTIME_ARGUMENTS --without-voice-runtime)
+endif()
 set(MSIME_BUNDLE_PLUGIN_PACKS_ARGUMENTS "")
 if(MSIME_STAGED_PLUGIN_PACKS)
   set(MSIME_BUNDLE_PLUGIN_PACKS_ARGUMENTS --plugin-packs "${MSIME_PLUGIN_PACKS_DIR}")
@@ -1154,7 +1184,8 @@ add_test(
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings/bundle_contents.py"
           "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>"
           --languages zh-Hans,en
-          ${MSIME_BUNDLE_PLUGIN_PACKS_ARGUMENTS})
+          ${MSIME_BUNDLE_PLUGIN_PACKS_ARGUMENTS}
+          ${MSIME_BUNDLE_VOICE_RUNTIME_ARGUMENTS})
 add_test(
   NAME info-plist-icons
   COMMAND "${Python3_EXECUTABLE}"
@@ -1299,6 +1330,16 @@ foreach(msime_target IN LISTS MSIME_SKIN_TARGETS)
   endif()
   target_sources(${msime_target} PRIVATE src/candidate/CandidateCanvas.mm)
   target_link_libraries(${msime_target} PRIVATE apple-client "-framework QuartzCore" "-framework ImageIO")
+endforeach()
+
+# 编译悬浮工具栏的所有目标都需要图片画布与共享解码桥。
+get_property(MSIME_TOOLBAR_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(msime_target IN LISTS MSIME_TOOLBAR_TARGETS)
+  get_target_property(msime_target_sources ${msime_target} SOURCES)
+  if(msime_target_sources AND "src/core/FloatingToolbarPanel.mm" IN_LIST msime_target_sources)
+    target_sources(${msime_target} PRIVATE src/core/ToolbarImageCanvas.mm)
+    target_link_libraries(${msime_target} PRIVATE apple-client "-framework QuartzCore")
+  endif()
 endforeach()
 
 # VoiceInputService.mm passes the system recogniser's text through shared/voice's tidy_local_transcript, so every target compiling it links the library that defines it. Found by source rather than listed, for the same reason as the loops above.

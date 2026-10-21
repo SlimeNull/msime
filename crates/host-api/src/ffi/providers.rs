@@ -26,6 +26,20 @@ pub extern "C" fn msime_client_online_query(handle: u64) -> *mut c_char {
             let Some(query) = session.runtime.online_query().map_err(|e| e.to_string())? else {
                 return Ok(Value::Null);
             };
+            let mut query = query;
+            let preferences = session
+                .requested
+                .as_ref()
+                .map_or(&session.applied, |snapshot| &snapshot.preferences);
+            if query.cloud_eligible && session.cloud_candidates_enabled() {
+                query.cloud_request = msime_client_core::cloud::candidates::build_request(
+                    &preferences.cloud_candidate_provider,
+                    &query.query_text,
+                    query.scheme == msime_engine::SchemeType::JapaneseRomaji as u8,
+                );
+                // 展开后超出边界时本次只用本地候选，不能让兼容分支改发默认 Google。
+                query.cloud_eligible = query.cloud_request.is_some();
+            }
             let mut value = serde_json::to_value(query).map_err(|e| e.to_string())?;
             value["cloud_candidates"] = Value::Bool(session.cloud_candidates_enabled());
             value["ai_assistant"] =
@@ -48,7 +62,7 @@ pub unsafe extern "C" fn msime_client_ai_request_for_query(
     query_length: usize,
 ) -> *mut c_char {
     response(|| {
-        if query.is_null() || query_length > 16384 {
+        if query.is_null() || query_length > msime_input_runtime::MAX_ONLINE_QUERY_BYTES {
             return Err("invalid AI query buffer".into());
         }
         let query = serde_json::from_slice::<OnlineQuery>(unsafe {
@@ -178,8 +192,7 @@ fn selected_translation_services(
     } else if tencent.enabled {
         TranslationService::Tencent
     } else if preferences.ai_assistant.enabled
-        && (msime_client_providers::ai::credential_for_endpoint(&preferences.ai_assistant)
-            .is_some()
+        && (msime_client_providers::ai::has_request_credential(&preferences.ai_assistant)
             || session_ai_credential.is_some_and(|credential| {
                 credential.endpoint == preferences.ai_assistant.endpoint
                     && msime_client_core::translation::usable_credential(&credential.token)
@@ -443,7 +456,7 @@ pub unsafe extern "C" fn msime_client_cloud_request_url(
     query_length: usize,
 ) -> *mut c_char {
     response(|| {
-        if query.is_null() || query_length > 16384 {
+        if query.is_null() || query_length > msime_input_runtime::MAX_ONLINE_QUERY_BYTES {
             return Err("invalid cloud query buffer".into());
         }
         let query = serde_json::from_slice::<OnlineQuery>(unsafe {
@@ -471,7 +484,10 @@ pub unsafe extern "C" fn msime_client_online_provider_request(
     socket_length: usize,
 ) -> *mut c_char {
     response(|| {
-        if query.is_null() || socket_path.is_null() || query_length > 16384 || socket_length > 4096
+        if query.is_null()
+            || socket_path.is_null()
+            || query_length > msime_input_runtime::MAX_ONLINE_QUERY_BYTES
+            || socket_length > 4096
         {
             return Err("invalid online provider buffer".into());
         }

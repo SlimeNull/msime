@@ -1,6 +1,7 @@
 import { SettingsFeaturePages } from "./settings-feature-pages";
 import { SettingsPreferencesForm } from "./settings-preferences-form";
 import { useSettingsPageModel, type SettingsPageProps } from "./use-settings-page-model";
+import { SettingsMascotIntro, settingsMascotIntro } from "./settings-mascot-intro";
 import { SettingsSidebar } from "./settings-sidebar";
 import { appThemeStyle, seasonAttr } from "../core/app-theme-style";
 import { SetupWarningStrip } from "../keyboard/setup-status-card";
@@ -21,6 +22,7 @@ import { WindowTitlebar } from "./window-titlebar";
 import * as settings from "./settings-style";
 import { FluentIcon } from "../core/fluent-icons";
 import { SettingsPluginCommunitySection } from "./settings-plugin-community-section";
+import { SettingsSkinEditorSection } from "./settings-skin-editor-section";
 import { SettingsSkinCommunitySection } from "./settings-skin-community-section";
 import {
   ScreenKeyboardLayoutContext,
@@ -67,7 +69,6 @@ function SettingsShell(props: SettingsPageProps) {
     inputSourceStartup,
     dismissInputSourceStartup,
     page,
-    dictionaryTab,
     settingsContentRef,
     windowMaximized,
     reload,
@@ -138,6 +139,15 @@ function SettingsShell(props: SettingsPageProps) {
       animation.play();
     }
   }, [page, pushedPage]);
+  const mascotIntro = mobilePlatform
+    ? undefined
+    : settingsMascotIntro(page, {
+        ...model.introTabs,
+        "screen-keyboard": model.handwritingOnScreenKeyboardPage
+          ? model.introTabs["screen-keyboard"]
+          : "keyboard",
+        tools: client.clipboard?.list ? model.introTabs.tools : "clipboard",
+      });
   const reloadSettings = createSettingsReloadAction({ dirty, reload, confirm });
   // 社区图库「添加」词库的去处：宿主有命名词库时装成一个独立的词库，否则导入本机词库。「社区」页和功能页里的图库共用。宿主能核对第三方词库时，发布词库前用它拦下来自搜狗细胞词库的词。
   const communityLocalDictionary = createCommunityLocalDictionary(
@@ -157,11 +167,15 @@ function SettingsShell(props: SettingsPageProps) {
     hasCommunitySkins: Boolean(client.communitySkins),
     hasCommunityCandidateSkins: Boolean(client.communityCandidateSkins),
     hasCommunityPlugins: Boolean(client.communityPlugins),
+    hasCandidateSkinEditor: Boolean(
+      model.host?.candidate_skin_editor && client.candidateSkinEditor && !mobilePlatform,
+    ),
   });
   const {
     skinTabs,
     desktopTabs: desktopSkinTabs,
     skinCommunityShown,
+    skinEditorShown,
     pluginCommunityShown,
   } = communityViews;
   const { onOpenPage } = createSettingsPageSelection({ selectPage });
@@ -193,16 +207,22 @@ function SettingsShell(props: SettingsPageProps) {
       macShell,
       onError: setError,
     });
-  const { parentPage, goBack, shownSidebarGroups, navSearchField } = useSettingsShellNavigation({
-    page,
-    navigationPage,
-    launchPage,
-    availablePages,
-    sidebarGroups,
-    navQuery,
-    setNavQuery,
-    selectPage,
-  });
+  const { parentPage, goBack, shownSidebarGroups, navSearchField, navSearchResults } =
+    useSettingsShellNavigation({
+      contentRef: pageColumnRef,
+      onRevealPage: (target) => {
+        if (target === "skin") setSkinView("mine");
+        if (target === "plugins") setPluginView("mine");
+      },
+      page,
+      navigationPage,
+      launchPage,
+      availablePages,
+      sidebarGroups,
+      navQuery,
+      setNavQuery,
+      selectPage,
+    });
   return (
     <div
       className={settings.shell}
@@ -251,6 +271,7 @@ function SettingsShell(props: SettingsPageProps) {
             shownSidebarGroups={shownSidebarGroups}
             navigationPage={navigationPage}
             navSearchField={navSearchField}
+            navSearchResults={navSearchResults}
             windowDragHandlers={windowDragHandlers}
             selectPage={selectPage}
           />
@@ -309,13 +330,24 @@ function SettingsShell(props: SettingsPageProps) {
                   {parentPage.title}
                 </button>
               )}
-              {!macShell && (
-                <SettingsPageHeader
-                  title={pageTitle}
-                  hiddenOnPhone={mobilePlatform && untitledOnPhone.includes(page)}
-                  onBack={pushedPage ? goBack : undefined}
-                  home={page === "home"}
-                />
+              {mascotIntro ? (
+                <SettingsMascotIntro {...mascotIntro}>
+                  {!macShell && (
+                    <SettingsPageHeader
+                      title={pageTitle}
+                      onBack={pushedPage ? goBack : undefined}
+                    />
+                  )}
+                </SettingsMascotIntro>
+              ) : (
+                !macShell && (
+                  <SettingsPageHeader
+                    title={pageTitle}
+                    hiddenOnPhone={mobilePlatform && untitledOnPhone.includes(page)}
+                    onBack={pushedPage ? goBack : undefined}
+                    home={page === "home"}
+                  />
+                )
               )}
               {/* 2-in-1 的根页面上没有设置引导卡片，所以输入法还需要添加或设为默认时，由 输入 和 关于 提示。 */}
               {settingsPlatform === "hm2" &&
@@ -360,6 +392,11 @@ function SettingsShell(props: SettingsPageProps) {
                 onSkinViewChange={setSkinView}
                 onSkinApplied={recordCommunitySkin}
               />
+              <SettingsSkinEditorSection
+                model={model}
+                views={communityViews}
+                onSkinViewChange={setSkinView}
+              />
               <SettingsPluginCommunitySection
                 model={model}
                 views={communityViews}
@@ -371,7 +408,8 @@ function SettingsShell(props: SettingsPageProps) {
                   model={{ ...model, draft }}
                   skinTabs={skinTabs}
                   desktopSkinTabs={desktopSkinTabs}
-                  skinCommunityShown={skinCommunityShown}
+                  // 社区图库和「制作皮肤」都画在表单之外，选中其一时表单里的皮肤页隐藏。
+                  skinCommunityShown={skinCommunityShown || skinEditorShown}
                   pluginCommunityShown={pluginCommunityShown}
                   externalActions={externalActions}
                   onRestoreDefaults={onRestoreDefaults}

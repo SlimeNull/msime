@@ -167,9 +167,9 @@ fn pack_sends_the_manifest_verbatim_and_exactly_the_referenced_images() {
 }
 
 #[test]
-fn pack_refuses_bases_the_server_does_not_store_yet() {
+fn pack_accepts_canvas_and_scroll_for_negotiated_upload() {
     let root = tempfile::tempdir().unwrap();
-    // msime-cloud 还不收 `canvas`（连同九宫格来源图）和 `wechat_scroll`，上传前就拒绝，而不是上传后才收到说不清原因的错误。
+    // 本地打包不依赖部署版本；网络上传单独探测明确的服务端能力。
     let canvas = root.path().join("canvas-demo");
     fs::create_dir_all(&canvas).unwrap();
     fs::write(
@@ -181,11 +181,8 @@ fn pack_refuses_bases_the_server_does_not_store_yet() {
     fs::write(canvas.join("panel.png"), png(1000)).unwrap();
     fs::write(canvas.join("panel-light.png"), png(1000)).unwrap();
     assert!(catalog::load_package(root.path(), "canvas-demo").is_ok());
-    assert_eq!(pack(root.path(), "canvas-demo").unwrap_err(), PACKAGE);
-    assert_eq!(
-        pack_as(root.path(), "canvas-demo", CandidateSkinVisibility::Private).unwrap_err(),
-        PACKAGE
-    );
+    assert_eq!(pack(root.path(), "canvas-demo").unwrap().file_count, 3);
+    assert!(pack_as(root.path(), "canvas-demo", CandidateSkinVisibility::Private).is_ok());
 
     let scroll = root.path().join("scroll-demo");
     fs::create_dir_all(&scroll).unwrap();
@@ -196,7 +193,7 @@ fn pack_refuses_bases_the_server_does_not_store_yet() {
     .unwrap();
     fs::write(scroll.join("preview.png"), png(1000)).unwrap();
     assert!(catalog::load_package(root.path(), "scroll-demo").is_ok());
-    assert_eq!(pack(root.path(), "scroll-demo").unwrap_err(), PACKAGE);
+    assert!(pack(root.path(), "scroll-demo").is_ok());
 
     // 服务端认得的 msime-windows 外观照常打包。
     let wechat = root.path().join("wechat-demo");
@@ -211,9 +208,9 @@ fn pack_refuses_bases_the_server_does_not_store_yet() {
 }
 
 #[test]
-fn pack_refuses_an_empty_author_or_description_the_server_still_rejects() {
+fn pack_accepts_empty_optional_metadata_for_negotiated_upload() {
     let root = tempfile::tempdir().unwrap();
-    // 目录把空串当作没写，msime-cloud 的 ParseStored 仍按长度拒收，所以打包时拒绝。
+    // 新服务端与目录把空串当作没写；旧部署的网络上传由能力探测拦截。
     for (id, line) in [
         ("empty-author", "author = ''\n"),
         ("empty-description", "description = ''\n"),
@@ -227,7 +224,7 @@ fn pack_refuses_an_empty_author_or_description_the_server_still_rejects() {
         .unwrap();
         fs::write(skin.join("preview.png"), png(1000)).unwrap();
         assert!(catalog::load_package(root.path(), id).is_ok(), "{id}");
-        assert_eq!(pack(root.path(), id).unwrap_err(), PACKAGE, "{id}");
+        assert!(pack(root.path(), id).is_ok(), "{id}");
     }
 }
 
@@ -271,7 +268,7 @@ fn pack_refuses_what_the_server_would_refuse() {
             "image = 'images/deco.gif'\n",
             BACKGROUND_TABLE,
             LICENSE,
-            FILE_TYPE,
+            IMAGE_INVALID,
         ),
         (
             TOP,
@@ -713,7 +710,7 @@ fn install_rejections_leave_the_previous_skin_untouched() {
         BASE64.encode(png(MAX_PACKAGE_FILE_BYTES + 1)),
     );
     cases.push((oversize, TOO_LARGE));
-    // Under the per-file cap decode_files checks, so only the preview cap applied after staging refuses it.
+    // Under the per-file cap load_files checks, so only the preview cap applied after staging refuses it.
     let mut oversize_preview = good.clone();
     oversize_preview.files.insert(
         PREVIEW.to_owned(),
@@ -776,6 +773,172 @@ fn install_refuses_a_symlinked_root() {
     std::os::unix::fs::symlink(outside.path(), &root).unwrap();
     assert_eq!(install(&root, &standard_download(), false), Err(STORAGE));
     assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+}
+
+/// `package` 里列出的图片改由 `directory` 下的本机文件给出：写出字节，从 base64 里拿掉，返回包内路径到绝对路径的映射。
+fn move_to_files(
+    package: &mut CandidateSkinPackage,
+    directory: &Path,
+    paths: &[&str],
+) -> BTreeMap<String, PathBuf> {
+    let mut local = BTreeMap::new();
+    for path in paths {
+        let data = package.files.remove(*path).unwrap();
+        let file = directory.join(path.replace('/', "-"));
+        fs::write(&file, BASE64.decode(data).unwrap()).unwrap();
+        local.insert((*path).to_owned(), file);
+    }
+    local
+}
+
+#[test]
+fn local_files_install_the_same_bytes_as_base64_and_may_come_from_the_skin_itself() {
+    let state = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let root = state.path().join("skins");
+    let expected = standard_download();
+    let mut package = expected.clone();
+    let local = move_to_files(&mut package, files.path(), &[BACKGROUND, DECORATION]);
+    assert_eq!(package.files.len(), 1);
+    assert_eq!(
+        install_with_local_files(&root, &package, &local, false).unwrap(),
+        "sakura"
+    );
+    for (path, data) in &expected.files {
+        assert_eq!(
+            fs::read(root.join("sakura").join(path)).unwrap(),
+            BASE64.decode(data).unwrap(),
+            "{path}"
+        );
+    }
+    assert!(catalog::load_package(&root, "sakura").is_ok());
+
+    // 改清单再装一遍时，全部图片可以直接指向已安装皮肤自己的文件：先读完再换入。
+    let mut renamed = expected.clone();
+    renamed.manifest = renamed.manifest.replace("樱花候选", "夜樱候选");
+    renamed.files.clear();
+    let own: BTreeMap<String, PathBuf> = expected
+        .files
+        .keys()
+        .map(|path| (path.clone(), root.join("sakura").join(path)))
+        .collect();
+    assert_eq!(
+        install_with_local_files(&root, &renamed, &own, true).unwrap(),
+        "sakura"
+    );
+    assert_eq!(
+        catalog::load_package(&root, "sakura").unwrap().name,
+        "夜樱候选"
+    );
+    assert_eq!(
+        fs::read(root.join("sakura").join(BACKGROUND)).unwrap(),
+        png(3000)
+    );
+    assert_no_helpers(&root);
+}
+
+#[test]
+fn local_files_are_refused_by_the_same_rules_and_leave_the_previous_skin() {
+    let state = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let root = state.path().join("skins");
+    fs::create_dir_all(root.join("sakura")).unwrap();
+    fs::write(root.join("sakura").join("skin.toml"), b"old").unwrap();
+    let before = snapshot(&root);
+    let good = standard_download();
+    let attempt = |change: &dyn Fn(&mut BTreeMap<String, PathBuf>)| {
+        let mut package = good.clone();
+        let mut local = move_to_files(&mut package, files.path(), &[BACKGROUND]);
+        change(&mut local);
+        install_with_local_files(&root, &package, &local, true)
+    };
+    let point = |target: PathBuf| {
+        move |local: &mut BTreeMap<String, PathBuf>| {
+            local.insert(BACKGROUND.to_owned(), target.clone());
+        }
+    };
+    // 相对路径、不存在的文件和目录都读不出来。
+    assert_eq!(attempt(&point(PathBuf::from("bg.png"))), Err(LOCAL_FILE));
+    assert_eq!(
+        attempt(&point(files.path().join("missing.png"))),
+        Err(LOCAL_FILE)
+    );
+    assert_eq!(attempt(&point(files.path().to_owned())), Err(LOCAL_FILE));
+    // 超过单张上限的文件按大小拒绝，不必读完；损坏的图和 base64 一样完整解码后拒绝。
+    let large = files.path().join("large.png");
+    fs::write(&large, png(MAX_PACKAGE_FILE_BYTES + 1)).unwrap();
+    assert_eq!(attempt(&point(large)), Err(TOO_LARGE));
+    let broken = files.path().join("broken.png");
+    fs::write(&broken, &png(3000)[..40]).unwrap();
+    assert_eq!(attempt(&point(broken)), Err(IMAGE_INVALID));
+    // 同一个包内路径不能既给 base64 又给文件。
+    let mut both = good.clone();
+    let local = BTreeMap::from([(PREVIEW.to_owned(), files.path().join("preview.png"))]);
+    fs::write(files.path().join("preview.png"), png(1000)).unwrap();
+    both.files
+        .insert(PREVIEW.to_owned(), BASE64.encode(png(1000)));
+    assert_eq!(
+        install_with_local_files(&root, &both, &local, true),
+        Err(FILE_PATH)
+    );
+    assert_eq!(snapshot(&root), before);
+    assert_no_helpers(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_files_refuse_symbolic_links() {
+    use msime_path_trust::untrusted_symlink as symlink;
+
+    let state = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let root = state.path().join("skins");
+    let real = files.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("bg.png"), png(3000)).unwrap();
+    symlink(real.join("bg.png"), files.path().join("linked.png")).unwrap();
+    symlink(&real, files.path().join("linked-directory")).unwrap();
+    let good = standard_download();
+    for target in [
+        files.path().join("linked.png"),
+        files.path().join("linked-directory").join("bg.png"),
+    ] {
+        let mut package = good.clone();
+        package.files.remove(BACKGROUND);
+        let local = BTreeMap::from([(BACKGROUND.to_owned(), target.clone())]);
+        assert_eq!(
+            install_with_local_files(&root, &package, &local, false),
+            Err(LOCAL_FILE),
+            "{target:?}"
+        );
+    }
+    assert!(!root.join("sakura").exists());
+}
+
+#[cfg(unix)]
+#[test]
+#[cfg_attr(
+    target_os = "android",
+    ignore = "Android 的 adb shell 域不允许建 FIFO（SELinux 拒绝 fifo_file create）"
+)]
+fn local_files_refuse_fifos() {
+    let state = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let root = state.path().join("skins");
+    let fifo = files.path().join("fifo.png");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    let mut package = standard_download();
+    package.files.remove(BACKGROUND);
+    let local = BTreeMap::from([(BACKGROUND.to_owned(), fifo)]);
+    assert_eq!(
+        install_with_local_files(&root, &package, &local, false),
+        Err(LOCAL_FILE)
+    );
+    assert!(!root.join("sakura").exists());
 }
 
 #[cfg(unix)]
@@ -1365,7 +1528,7 @@ fn transport_lists_with_scope_and_encoded_search() {
     assert_eq!(page.skins, vec![item()]);
     let (head, _) = received.recv().unwrap();
     assert!(head.starts_with(
-        "GET /v1/community/candidate-skins?offset=20&q=%E6%A8%B1%20%E8%8A%B1&scope=mine&fields=sync&fields=moderation&include=category HTTP/1.1"
+        "GET /v1/community/candidate-skins?offset=20&q=%E6%A8%B1%20%E8%8A%B1&scope=mine&fields=sync&fields=moderation&include=category&resources=canvas-v1 HTTP/1.1"
     ));
     assert!(head.contains("authorization: Bearer "));
 }
@@ -1388,7 +1551,9 @@ fn transport_publishes_a_body_larger_than_the_account_default() {
         response
     );
     let (head, body) = received.recv().unwrap();
-    assert!(head.starts_with("POST /v1/community/candidate-skins?include=category HTTP/1.1"));
+    assert!(head.starts_with(
+        "POST /v1/community/candidate-skins?include=category&resources=canvas-v1 HTTP/1.1"
+    ));
     assert!(head.contains("authorization: Bearer "));
     assert!(body.len() > 2_880_000);
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1419,7 +1584,7 @@ fn transport_accepts_a_download_above_one_mebibyte() {
     );
     let (head, _) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "POST /v1/community/candidate-skins/{}/download HTTP/1.1",
+        "POST /v1/community/candidate-skins/{}/download?resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
 }
@@ -1570,7 +1735,7 @@ fn transport_reads_the_sync_list_and_refuses_a_malformed_row() {
         vec![entry.clone()]
     );
     let (head, _) = received.recv().unwrap();
-    assert!(head.starts_with("GET /v1/community/candidate-skins/sync HTTP/1.1"));
+    assert!(head.starts_with("GET /v1/community/candidate-skins/sync?resources=canvas-v1 HTTP/1.1"));
 
     let mut bad = entry.clone();
     bad.request_sha256 = "A".repeat(64);
@@ -1602,7 +1767,7 @@ fn transport_replaces_and_sets_visibility_by_id() {
     );
     let (head, body) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "PUT /v1/community/candidate-skins/{}?include=category HTTP/1.1",
+        "PUT /v1/community/candidate-skins/{}?include=category&resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1624,7 +1789,7 @@ fn transport_replaces_and_sets_visibility_by_id() {
     );
     let (head, body) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "PATCH /v1/community/candidate-skins/{}?include=category HTTP/1.1",
+        "PATCH /v1/community/candidate-skins/{}?include=category&resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
     assert_eq!(
@@ -1711,7 +1876,7 @@ fn transport_filters_by_category_and_always_includes_it() {
     assert_eq!(page.skins, vec![item()]);
     let (head, _) = received.recv().unwrap();
     assert!(head.starts_with(
-        "GET /v1/community/candidate-skins?offset=0&q=&fields=sync&category=acg&include=category HTTP/1.1"
+        "GET /v1/community/candidate-skins?offset=0&q=&fields=sync&category=acg&include=category&resources=canvas-v1 HTTP/1.1"
     ));
 
     let (origin, received) = serve_once(serde_json::to_vec(&item()).unwrap());
@@ -1719,7 +1884,7 @@ fn transport_filters_by_category_and_always_includes_it() {
     assert_eq!(client.candidate_skin(item().id, None).unwrap(), item());
     let (head, _) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "GET /v1/community/candidate-skins/{}?fields=sync&fields=moderation&include=category HTTP/1.1",
+        "GET /v1/community/candidate-skins/{}?fields=sync&fields=moderation&include=category&resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
 }
@@ -1738,7 +1903,7 @@ fn transport_sets_the_category_by_id() {
     );
     let (head, body) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "PATCH /v1/community/candidate-skins/{}?include=category HTTP/1.1",
+        "PATCH /v1/community/candidate-skins/{}?include=category&resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
     assert_eq!(
@@ -1976,3 +2141,5 @@ fn a_jpeg_that_ends_early_or_has_too_many_scans_does_not_decode() {
     assert_eq!(check_image("image/jpeg", at_limit), Ok(64));
     assert_eq!(check_image("image/jpeg", over_limit), Err(IMAGE_INVALID));
 }
+
+mod canvas_resources;

@@ -23,7 +23,7 @@ cargo run --quiet -p msime-host-api --example prepare_host --locked -- "$HOME/Li
 
 签名身份按证书的 SHA-1 取，不按名字。钥匙串里同时存在两张有效的同名 Developer ID Application 证书是常态（续期的那张和它替换的那张并存），而 `codesign` 遇到同时匹配两张的名字不会自己挑一张，直接报 `ambiguous (matches … and …)` 拒签——那时运行中的输入法已经被停掉了。哈希不会有歧义；本机安装用哪张都可以，所以脚本取第一张并把找到几张打出来，要指定就把 `MSIME_SIGNING_IDENTITY` 设成 `security find-identity -v -p codesigning` 里的 SHA-1。
 
-`check_input_source.swift` 的退出码分三种，`install.sh` 按它选提示：0 是每条注册的源都 enabled；2 是能从输入菜单选中（至少一条 select-capable 的源是 enabled）但还有别的源没启用；1 才是不可用——不在注册表里，或在注册表里却没有任何可选中的源是 enabled 的。带模式的输入法在注册表里是多条：一条不可选中的总源，加上每个模式一条，所以判断是否可用要看可选中的那些，不是看是不是全部 enabled。以前任何一条 disabled 都退 1，于是一个中文模式正常、能打字的安装会被报成「本次登录会话看不到它」，并让人去注销重新登录，而那改变不了任何事情。LaunchServices 会把每个 worktree `target/` 下的构建产物都按同一个发布 identifier 登记，`install.sh` 因此在注册前只保留已安装的那一条。bundle 本身是否装配正确由 `bundle-contents` 这项 CTest 检查（图标是否真的暂存进去、用途字符串是否每种语言都有、语音提示音 `audios/start.mp3` / `end.mp3` 是否随包、本地识别助手 `msime-voice-local` 与 sherpa-onnx 运行库及其许可证是否随包）。
+`check_input_source.swift` 的退出码分三种，`install.sh` 按它选提示：0 是每条注册的源都 enabled；2 是能从输入菜单选中（至少一条 select-capable 的源是 enabled）但还有别的源没启用；1 才是不可用——不在注册表里，或在注册表里却没有任何可选中的源是 enabled 的。带模式的输入法在注册表里是多条：一条不可选中的总源，加上每个模式一条，所以判断是否可用要看可选中的那些，不是看是不是全部 enabled。以前任何一条 disabled 都退 1，于是一个中文模式正常、能打字的安装会被报成「本次登录会话看不到它」，并让人去注销重新登录，而那改变不了任何事情。LaunchServices 会把每个 worktree `target/` 下的构建产物都按同一个发布 identifier 登记，`install.sh` 因此在注册前只保留已安装的那一条。bundle 本身是否装配正确由 `bundle-contents` 这项 CTest 检查（图标是否真的暂存进去、用途字符串是否每种语言都有、语音提示音 `audios/start.mp3` / `end.mp3` 是否随包、本地识别助手 `msime-voice-local` 与 sherpa-onnx 运行库及其许可证是否随包；以 `-DMSIME_BUNDLE_VOICE_RUNTIME=OFF` 构建时改为核对运行库不在包里，许可证照旧随包）。
 
 bundle 使用系统已登记的 `app.msime.inputmethod.MetasequoiaIME`，已在列表中的 identifier 原地更新正常：`install.sh` 安装之后，`check_input_source.swift` 稳定报出 `app.msime.inputmethod.MetasequoiaIME`、`.Hans` 与 `.Roman` 三条。
 
@@ -51,7 +51,7 @@ log show --last 5m --style compact --info --predicate 'subsystem == "app.msime.i
 
 ## 发布包
 
-`.github/workflows/release-macos.yml` 手动触发，在 macos-15（Apple silicon）上用 Xcode 26.3（macOS 26 SDK，与 CI 同一个版本）运行 `package-release.sh`，产出同时支持 Apple 芯片和 Intel 的 `msime-macos-<版本>-universal.dmg` 与 `SHA256SUMS`（本机打包前先 `rustup target add aarch64-apple-darwin x86_64-apple-darwin`），作为 workflow artifact 上传；`publish` 输入打开时才以 `macos-v<版本>` 发布这两个文件。同一个脚本可在本机跑出同样的包：
+`.github/workflows/release-macos.yml` 手动触发，在 macos-15（Apple silicon）上用 Xcode 26.3（macOS 26 SDK，与 CI 同一个版本）运行 `package-release.sh`，产出同时支持 Apple 芯片和 Intel 的 `msime-macos-<版本>-universal.dmg` 与 `SHA256SUMS`（本机打包前先 `rustup target add aarch64-apple-darwin x86_64-apple-darwin`），作为 workflow artifact 上传；`publish` 输入打开时才以 `macos-v<版本>` 发布。版本发布页上只有每个版本一个的 DMG 和只列这些 DMG 的 `SHA256SUMS`，发布说明开头是 `scripts/edition_bundle.py download-guide` 从版本表生成的下载指引（各版本的 DMG、推荐完整版，正式版附 Homebrew 命令）。dSYM zip 不进版本发布页，由 `scripts/publish-dsym.sh` 传到滚动的 `macos-symbols` release（预发布、不设为 latest），每个发布一份、长期保留；Sparkle 更新包放在 `macos-appcast`，见下文「Sparkle 更新」。同一个脚本可在本机跑出同样的包：
 
 ```sh
 MSIME_SPARKLE_ROOT=/absolute/path/to/Sparkle-2.9.6 platforms/macos/package-release.sh [版本] [输出目录]
@@ -63,20 +63,22 @@ DMG 里是设置应用（`MSIME.app`）、指向 `/Applications` 的链接和一
 
 ### 核心词库与按需下载的资源包
 
-发布包只带装好就能打中文的核心词库：`EngineResources` 里的 `msime-pinyin.db`、`msime-wubi.db`、`msime-bigram.bin`、`msime-trigram.bin`、`msime-english.db` 与 SCOWL 的许可声明 `msime-scowl_Copyright.txt`、`msime-others.db`、`sentence-model.safetensors`、`msime-dictionary-manifest.json` 和 `helpcodes/`（缺了辅助码表会话建不起来），另有离线释义、许可证、`msime-mcp` 和内嵌的输入法。`stage-resources.sh` 在 `MSIME_MACOS_OMIT_ON_DEMAND=1` 下按这条规则暂存，`check_app` 断言日文词典、粤拼、注音与笔画词库、手写模型都不在包里，并给 `EngineResources` 定了 126000 KiB 的体积预算；打包结束时打印 DMG 和 `Contents/Resources` 的体积，在 GitHub Actions 里同时写进步骤摘要。
+发布包只带装好就能打中文的核心词库：`EngineResources` 里的 `msime-pinyin.db`、`msime-bigram.bin`、`msime-trigram.bin`、`msime-english.db` 与 SCOWL 的许可声明 `msime-scowl_Copyright.txt`、`msime-others.db`、`sentence-model.safetensors`、`msime-dictionary-manifest.json` 和 `helpcodes/`（缺了辅助码表会话建不起来），另有离线释义、许可证、`msime-mcp` 和内嵌的输入法。五笔码表 `msime-wubi.db` 只随五笔是默认方案的版本（水杉五笔）发布，其余版本按需下载。`stage-resources.sh` 在 `MSIME_MACOS_OMIT_ON_DEMAND=1` 下按这条规则暂存（`verify_resources --omit-on-demand --platform macos`），`check_app` 断言日文词典、五笔码表（五笔版除外）、粤拼、注音与笔画词库、手写模型都不在包里，并给 `EngineResources` 定了 126000 KiB 的体积预算；打包结束时打印 DMG 和 `Contents/Resources` 的体积，在 GitHub Actions 里同时写进步骤摘要。
 
 其余资源包由设置应用下载到 `<state_root>/resource-packs/<id>/`（`state_root` 是 HostOptions 的 `preferences_directory`，默认 `~/Library/Application Support/app.msime.macos`），文件平铺、许可证放在数据旁边，最后写入的 `msime-model.json` 标记安装完整。地址、长度和 SHA-256 来自仓库里的锁文件，镜像沿用 `voice_input.asr_model_mirror`：
 
 - `japanese`：`msime-japanese.dat`、`msime-mozc_dictionary_oss_README.txt` 与 `msime-mozc_LICENSE.txt`，取自 `resources/desktop-dictionary.lock.json` 的这三项。在设置里选「日文」时自动下载；设置应用启动时已保存的方案是日文也会补下（水杉日语只有日文方案，状态目录第一次准备好时偏好就是日文，所以它的设置应用第一次启动就下载，日文版的 DMG 同样不内置这三个文件）；「临时日语」只在那一行点「下载」时下载，不会因为开着它而自动下载。
+- `wubi`：`msime-wubi.db`，取自 `resources/desktop-dictionary.lock.json` 的这一项。在设置里选「五笔」时自动下载，设置应用启动时已保存的方案或上一次的中文方案是五笔也会补下。没有它时五笔像缺词库的粤拼一样不可选，输入法菜单不列出它，已保存为五笔的偏好由 host-api 回退到上一次的中文方案或本版本的默认方案；日志里的五笔学习记录在准备工作词库时跳过、留在日志里，码表下载之后建会话时并进工作词库并补写这些记录（`EngineOptions::wubi_dictionary`）。拼音用不到它：五笔反查编码只在五笔方案里显示，设置页的五笔查码只在五笔可用时出现。
 - `language-dictionaries`：`msime-cantonese.db`、`msime-zhuyin.db`、`msime-stroke.db` 与各自的许可证，按 `resources/language-dictionaries.lock.json`。选「粤拼」「注音」或「笔画」时自动下载，启动时已保存的方案或上一次的中文方案是这三者之一也会补下。锁文件在新的 langdict 发布之前还不含 `msime-stroke.db`，在那之前下载的包里没有它，笔画只能用 `stage-resources.sh` 暂存的开发副本。
 - `handwriting`：`handwriting-zh_CN.model` 与 `HandwritingModel-LICENSE.txt`，按 `resources/handwriting-model.lock.json`。第一次打开手写面板时下载。
 - `settled-model`：桌面整句重排模型 `sentence-model-desktop.safetensors`，按 `resources/settled-model.lock.json`。打开「桌面神经联想」时下载，设置应用启动时这个开关开着也会补下。
+- `voice-runtime-macos`：本地语音识别的 sherpa-onnx 运行库 `libsherpa-onnx-c-api.dylib`（universal），按 `resources/voice-runtime-macos.lock.json`。输入法和 `msime-voice-local` 开着 hardened runtime，库验证只加载同一 Team ID 签名的库，所以这里下载的不是上游原样的 dylib，而是 `.github/workflows/publish-macos-voice-runtime.yml`（`scripts/sign-voice-runtime.sh`）剥掉局部符号、用本项目 Developer ID 重签并公证后，作为本仓库 `voice-runtime-macos-v<版本>` Release 资产发布的 ZIP；每个 sherpa-onnx 版本只签一次，资产发布后不再替换，锁文件钉住归档和其中 dylib 的 SHA-256。锁文件还没固定归档时这个资源包不存在，发布包照旧内置运行库；固定之后、而且这次也用锁文件里的 Team ID 签名时，`package-release.sh` 以 `-DMSIME_BUNDLE_VOICE_RUNTIME=OFF` 构建，运行库不进输入法 bundle（ad-hoc 或别的团队签名的包仍内置，否则装出来的输入法加载不了下载的库）。选用本地识别时下载，设置应用启动时语音服务是本地识别也会补下；输入法的 bundle 里没有运行库时，把已装好的这一份以 `--runtime` 交给 `msime-voice-local`，没装好时提示去语音设置下载。开发构建照旧内置运行库。
 
-查找时下载的那份优先（`settled-model` 例外：随包或配置记录的模型优先，下载的那份兜底），其次是随包内置或旧配置记录的那份（`language_dictionaries` 键指向的目录、资源目录里的 `msime-japanese.dat`、`Contents/Resources/handwriting` 里的模型），两处都没有时对应方案或手写面板显示为不可用，和以前缺数据时一样降级。输入法在输入框获得焦点时重新看一次这几个路径，会话打开后才装好的资源包在下一次输入空闲时生效，不必重启输入法。
+查找时下载的那份优先（`settled-model` 例外：随包或配置记录的模型优先，下载的那份兜底），其次是随包内置或旧配置记录的那份（`language_dictionaries` 键指向的目录、资源目录里的 `msime-japanese.dat`、`Contents/Resources/handwriting` 里的模型），两处都没有时对应方案或手写面板显示为不可用，和以前缺数据时一样降级。输入法在输入框获得焦点时重新看一次这几个路径，会话打开后才装好的资源包在下一次输入空闲时生效，不必重启输入法（语音运行库在下一次启动识别辅助进程时生效）。
 
 用户词库的代次仍按完整的 `desktop-dictionary.lock.json` 计算，`user/dictionaries/<代次>` 不会因为包里少了日文词典而变化，所以从内置全部资源的旧版本升级上来不会重新准备工作词库。升级后旧配置里记录的资源目录和语言词库目录如果还在，照常作为兜底；Sparkle 换掉整个 bundle 后包里的那份已经不在，设置应用启动时按已保存的方案补下需要的资源包。
 
-`package-release.sh` 在编译之前先用 App 运行时的同一个安装器（`install_resource_pack` 示例）把 macOS 会下载的四个资源包（`japanese`、`language-dictionaries`、`handwriting`、`settled-model`，按 id 列出，不装只给 Android 的离线释义和语音运行库）装进临时目录，地址失效或哈希漂移的发布包不会被打出来。`msime-dictionary/.github/workflows/release-built-dictionaries.yml` 发布的词库 release 是已发布 App 的下载源，不能删除，附件也不能替换。`.github/workflows/ci-macos-package.yml` 在合进 develop、且改动碰到打包输入的推送上检查核心词库的暂存规则和资源包可下载，并在 Apple 芯片的 runner 上打一个未签名的包；它不是分支保护要求的检查，每周还会定时跑一次。`scripts/test-macos-package-resources.py` 静态核对这几处保持一致。
+`package-release.sh` 在编译之前先用 App 运行时的同一个安装器（`install_resource_pack` 示例）把 macOS 会下载的资源包（`japanese`、`wubi`、`language-dictionaries`、`handwriting`、`settled-model`，省略运行库时还有 `voice-runtime-macos`，并核对下载的运行库由锁文件的 Team ID 签名、两种架构都在；按 id 列出，不装只给 Android 的离线释义和语音运行库）装进临时目录，地址失效或哈希漂移的发布包不会被打出来。`msime-dictionary/.github/workflows/release-built-dictionaries.yml` 发布的词库 release 是已发布 App 的下载源，不能删除，附件也不能替换。`.github/workflows/ci-macos-package.yml` 在合进 develop、且改动碰到打包输入的推送上检查核心词库的暂存规则和资源包可下载，并在 Apple 芯片的 runner 上打一个未签名的包；它不是分支保护要求的检查，每周还会定时跑一次。`scripts/test-macos-package-resources.py` 静态核对这几处保持一致。
 
 签名与公证取决于仓库 secrets，全部可选。括号里是 workflow 把它们交给 `package-release.sh` 时用的环境变量名，本机打包时直接设置这些变量：
 
@@ -87,15 +89,15 @@ DMG 里是设置应用（`MSIME.app`）、指向 `/Applications` 的链接和一
 
 workflow 曾经读取的是括号里的名字，而仓库的 secrets 是以前面的名字存的；读不存在的 secret 得到空串，不报错，于是每次发布都悄悄退回 ad-hoc。
 
-有证书时，输入法按 `scripts/install.sh` 的方式签名（`--deep --options runtime --timestamp`，带 `resources/VoiceInput.entitlements`），设置应用与 DMG 再各签一层（外层不加 `--deep`，以免覆盖输入法的 entitlements）；三项公证凭据也齐全时 DMG 经公证并 staple。只有签名且公证过的包才能走完上面的安装流程。本机设置 `MACOS_SIGNING_IDENTITY`（钥匙串里已有的 Developer ID 身份）与三项公证凭据即可走同一条签名与公证路径，CI 另从 `MACOS_CERTIFICATE_P12_BASE64` 导入证书；目前只验证过 ad-hoc 路径。
+有证书时，输入法按 `scripts/install.sh` 的方式签名（`--deep --options runtime --timestamp`，带 `resources/VoiceInput.entitlements`），设置应用与 DMG 再各签一层（外层不加 `--deep`，以免覆盖输入法的 entitlements）；三项公证凭据也齐全时 DMG 经公证并 staple：每个版本的 DMG 一做好就提交公证、不等结果，接着打下一个版本；全部提交后再逐个取结果，任何一个没通过就打印它的 `notarytool log` 并失败，全部通过后按顺序逐个装订（`scripts/staple-ticket.sh`），最后挂载每个 DMG 再检查一遍。只有签名且公证过的包才能走完上面的安装流程。本机设置 `MACOS_SIGNING_IDENTITY`（钥匙串里已有的 Developer ID 身份）与三项公证凭据即可走同一条签名与公证路径，CI 另从 `MACOS_CERTIFICATE_P12_BASE64` 导入证书；目前只验证过 ad-hoc 路径。
 
 没有这些 secrets 时所有签名都是 ad-hoc、也不公证。下载的应用被 Gatekeeper 隔离，第一次要右键「打开」，或执行 `xattr -dr com.apple.quarantine "/Applications/MSIME.app"`；之后设置应用可以运行、词库可以准备，但内嵌的输入法是 ad-hoc 签名，macOS 不会把它登记为输入源（见上一节与 `scripts/install.sh` 开头的说明），安装窗口、启动时的刷新与「修复输入源」都会在注册这一步失败：已有安装时回滚到原有安装，设置页提示安装失败；没有安装时 bundle 按上面的首次安装规则留在原处、提示重新登录，但 ad-hoc 签名的输入源重新登录后也不会出现。这种包只对有自己 Developer ID 的开发者可用：用 `scripts/install.sh` 重签并安装其中的 `水杉输入法.app`。
 
 ### Sparkle 更新
 
-装好之后，输入法本体（`~/Library/Input Methods` 里的那份）经 Sparkle 自己更新，不用再下载 DMG。只有带 Sparkle 私钥打出的发布包有这条路径：`release-macos.yml` 把仓库 secret `SPARKLE_ED_PRIVATE_KEY`（Sparkle 的 EdDSA 私钥）交给 `package-release.sh`，后者先核对它与 `sparkle-public-key.txt` 里的公钥是一对，再以 `-DMSIME_SPARKLE_APPCAST_BASE_URL` 配置 CMake，输入法的 Info.plist 于是带上 `SUFeedURL`（`https://github.com/metasequoiaime/msime/releases/download/macos-appcast/appcast-<版本 id>.xml`，`edition_bundle.py` 把 full 的改成各版本的）、`SUPublicEDKey`、`SURequireSignedFeed`、`SUVerifyUpdateBeforeExtraction`、每天一次的自动检查和静默更新。现在这对密钥是 2026-10-15 换的（见 `.agents/notes/implemented/process/2026-10-15-macos-sparkle-key-rotation.md`），私钥的备份在维护者的密码管理器里。不要再换：已经装上的输入法只认 `sparkle-public-key.txt` 里的公钥，换了它们就再也收不到更新。每个版本另出一个签好名的 `<dmg_prefix>-VERSION-input-method.zip`（随 DMG 挂在 `macos-vVERSION` 上、写进 SHA256SUMS）和一份用 Sparkle 的 `generate_appcast` 签过的 `appcast-<版本 id>.xml`。main 上的正式版发布后，workflow 把这些 appcast 传到滚动的 `macos-appcast` release（预发布、不设为 latest），已发布的 appcast 版本更高时停下。beta、alpha 和 nightly 的输入法同样带 feed，但它们自己不进 appcast。没有这个 secret 的构建（fork、开发构建）不带任何 Sparkle 键，输入法与设置应用的「检查更新…」照旧打开官网下载页（`msime.app/download/?platform=macos`），那里有 GitHub 和国内镜像两种下载。
+装好之后，输入法本体（`~/Library/Input Methods` 里的那份）经 Sparkle 自己更新，不用再下载 DMG。只有带 Sparkle 私钥打出的发布包有这条路径：`release-macos.yml` 把仓库 secret `SPARKLE_ED_PRIVATE_KEY`（Sparkle 的 EdDSA 私钥）交给 `package-release.sh`，后者先核对它与 `sparkle-public-key.txt` 里的公钥是一对，再以 `-DMSIME_SPARKLE_APPCAST_BASE_URL` 配置 CMake，输入法的 Info.plist 于是带上 `SUFeedURL`（`https://github.com/metasequoiaime/msime/releases/download/macos-appcast/appcast-<版本 id>.xml`，`edition_bundle.py` 把 full 的改成各版本的）、`SUPublicEDKey`、`SURequireSignedFeed`、`SUVerifyUpdateBeforeExtraction`、每天一次的自动检查和静默更新。现在这对密钥是 2026-10-15 换的（见 `.agents/notes/implemented/process/2026-10-15-macos-sparkle-key-rotation.md`），私钥的备份在维护者的密码管理器里。不要再换：已经装上的输入法只认 `sparkle-public-key.txt` 里的公钥，换了它们就再也收不到更新。每个版本另出一个签好名的 `<dmg_prefix>-VERSION-input-method.zip` 和一份用 Sparkle 的 `generate_appcast` 签过的 `appcast-<版本 id>.xml`，zip 的摘要写在单独的 `sparkle-SHA256SUMS` 里。main 上的正式版发布后，workflow 用 `scripts/publish-sparkle-feed.sh` 把 zip 和 appcast 都传到滚动的 `macos-appcast` release（预发布、不设为 latest），appcast 的下载地址也指向那里：先传 zip、按公开地址下载核对，再传 appcast，最后删掉不再被任何 appcast 指向的旧 zip；已发布的 appcast 版本更高时停下。版本发布页 `macos-vVERSION` 上只有给用户下载的 DMG 和只列它们的 SHA256SUMS，不放更新包。beta、alpha 和 nightly 的输入法同样带 feed，但它们自己不进 appcast，它们的 zip 只在 workflow artifact 里。0.54.0 发布时 zip 还挂在 `macos-v0.54.0` 上，已用 `relocate-macos-release-extras.yml`（`scripts/relocate-release-extras.sh`）搬到 `macos-appcast` 并重新签过 appcast，见 `.agents/notes/implemented/process/2026-10-20-macos-release-page-only-dmgs.md`。没有这个 secret 的构建（fork、开发构建）不带任何 Sparkle 键，输入法与设置应用的「检查更新…」照旧打开官网下载页（`msime.app/download/?platform=macos`），那里有 GitHub 和国内镜像两种下载。
 
-设置应用的「检查更新」在带 feed 的发布包中也使用 Sparkle：它读取独立的 `appcast-settings-<版本 id>.xml`，下载完整应用、验证签名、替换并重启，启动时再安装内嵌的新输入法。发布产物同时包含 `<dmg_prefix>-VERSION-settings.zip`。设置应用沿用输入法的公钥与单调构建号；无 feed 的开发包保留官网下载入口。旧版设置应用首次接入仍需安装一次带此能力的新版本。
+设置应用的「检查更新」在带 feed 的发布包中也使用 Sparkle：它读取独立的 `appcast-settings-<版本 id>.xml`，下载完整应用、验证签名、替换并重启，启动时再安装内嵌的新输入法。发布产物同时包含 `<dmg_prefix>-VERSION-settings.zip`，与输入法的 zip 一样放在 `macos-appcast` 上。设置应用沿用输入法的公钥与单调构建号；无 feed 的开发包保留官网下载入口。旧版设置应用首次接入仍需安装一次带此能力的新版本。
 
 Sparkle 跑在输入法进程里，几处默认行为对它不合适，`src/core/UpdateController.mm` 改掉了：输入法是 `LSBackgroundOnly`，Sparkle 的提醒窗口会从正在打字的应用那里抢走焦点，所以后台检查到的更新只静默下载，由委托接管安装时机，在用户切到别的输入源时安装（`input_method_main.mm` 的 `switchedAway`），应用退出时 Sparkle 也会装；装完不重新拉起，系统在下次需要时从新 bundle 拉起它。独立设置窗口只在以 `--preferences` 参数启动输入法 bundle 时出现（`src/input/input_method_main.mm` 的 `MSIMEShouldShowPreferences`），不带参数直接启动 bundle 不会打开它。手动「检查更新…」显示 Sparkle 自己的界面。
 
@@ -191,6 +193,8 @@ AI 候选与候选释义相互独立：与来源的 `ai_eligible` / `UpdateAiInp
 
 `skin-settings` 原生测试覆盖七个主题卡的选择与保持启用、浅色与深色槽位各启用一款、再点停用一个槽位与两种明暗的说明文字、无副作用明暗预览、系统主题标题、外部卡重复刷新无累积、无效包诊断、空状态、打开目录的路径/失败检查，以及入口窗口构造与重复使用。测试目录打开器为替身，不启动 Finder；只操作临时合成目录，卡片离屏图像逐项检查。
 
+`skin-package-replace` 原生测试覆盖选中的皮肤包在原处被同名替换：按安装的暂存加 rename 方式整包换掉、原地改写装饰图、原地改写 `skin.toml`、删掉再装回，每次 `-reloadReplacedSkinPackages` 都要读到新的装饰带高度、宽度和装饰图像素尺寸，什么都没变时不重新解析。输入法在候选窗出现前和每秒的偏好轮询里调用它，所以替换正在用的皮肤后不必重启输入法。
+
 设置窗口的候选预览迁自同一固定版本的 `CandidateSkinPreviewView`，随布局、每页数量、字号和皮肤实时更新。使用固定演示样例而非真实输入；竖排最多展示五行并提示剩余项，横排不足时显示省略号。可单独切换预览明暗主题，也可同时展示横排、竖排及状态栏样式；这些预览操作不写偏好或调用输入会话。预览里的状态栏是非交互展示，实际悬浮工具栏由 `FloatingToolbarPanel.mm` 绘制。外部装饰图和长预览在可滚动区域显示。预览使用注入的设置快照与皮肤目录，不读取 MSIME-Apple 产品设置；强制主题的系统文字颜色在对应绘制外观下解析。
 
 `skin-preview` 原生测试覆盖七个全局主题 × 两布局 × 三页大小 × 三字号 × 两种外观的绘制，设置控件联动、无副作用的预览主题/展示切换、系统外观跟随、外部包回退、装饰区域可见像素和长内容滚动。原生合成 PNG 使用明确的 RGB 数据与 sRGB 标记，避免透明夹具掩盖绘制缺失；像素断言允许系统 ColorSync 转换，不宣称跨显示器逐像素一致。
@@ -201,7 +205,7 @@ AI 候选与候选释义相互独立：与来源的 `ai_eligible` / `UpdateAiInp
 
 每页候选按 `CandidatePageSize.h` 提供 3–10 项（共享偏好接受 1–10），默认 6，超出范围的值拉到最近的一端。每页十个时第十个候选序号标 0，由数字行或小键盘的 0 键选；每页不到十个时 0 键照旧交给 Engine 或应用。原生偏好在创建/激活会话及设置变更时请求共享分页覆盖；组合期间保持当前页、高亮和数字选词映射，组合结束后使用最后一次选择。此 macOS 原生覆盖优先于共享偏好中的 candidate_page_size，并在共享 Engine 配置重建后保留；不修改共享偏好文件。视图的 page_size 反映实际生效值。原生设置和 C API 测试覆盖保存、延迟、非法值、重复请求与重载。
 
-布局和字号按固定 Apple 来源的 `CandidatePanelStyle.h`、`CandidateFontSize.h` 与原生设置控件迁移：默认横排/18 点，提供横向排列、纵向列表，以及 16/18/20 点字号。“水杉输入法设置…”打开共享设置页的外观页，Tauri 不可用时回退到原生偏好窗口的同一组设置项。值保存到宿主自身 NSUserDefaults 域，不读取或改写 MSIME-Apple 产品偏好，也不改动共享 Engine 配置。已激活候选立即重绘，组合及页内高亮保留。横排左右键导航、上下键消费；竖排上下键导航，左右键与候选隐藏时一样移动组合光标并刷新候选，对齐 Windows 候选显示时 `VK_LEFT`/`VK_RIGHT` 映射为光标移动。候选排版按来源 `CandidateList::MeasureItem` / `Measure`（经 Windows `candidate_item_layout` / `candidate_page_layout` 移植为 `CandidateItemLayout.h`）：候选文字、辅助码和译文比所在列宽时在列内折行，不截断；每行取自身高度，竖排各行按自身高度堆叠；竖排译文放得下时与文字同行，放不下时移到文字下方换行，辅助码一旦下移译文也随之下移；横排译文总在文字下方，每项取自然宽度从左向右排列，放不下的一项起新的一行，只有单项比整行还宽时才收窄到行宽并在其中折行。候选窗宽度以所在屏幕可见区域的一半封顶，预编辑行同样受此限制。
+布局和字号按固定 Apple 来源的 `CandidatePanelStyle.h`、`CandidateFontSize.h` 与原生设置控件迁移：默认横排/18 点，提供横向排列、纵向列表，以及 16/18/20 点字号。“水杉输入法设置…”打开共享设置页的外观页，Tauri 不可用时回退到原生偏好窗口的同一组设置项。值保存到宿主自身 NSUserDefaults 域，不读取或改写 MSIME-Apple 产品偏好，也不改动共享 Engine 配置。已激活候选立即重绘，组合及页内高亮保留。横排左右键导航、上下键消费；竖排上下键导航，左右键与候选隐藏时一样移动组合光标并刷新候选，对齐 Windows 候选显示时 `VK_LEFT`/`VK_RIGHT` 映射为光标移动。候选排版按来源 `CandidateList::MeasureItem` / `Measure`（经 Windows `candidate_item_layout` / `candidate_page_layout` 移植为 `shared/candidate/CandidateItemLayout.h`，Linux 的 X11 原生画布用同一份）：候选文字、辅助码和译文比所在列宽时在列内折行，不截断；每行取自身高度，竖排各行按自身高度堆叠；竖排译文放得下时与文字同行，放不下时移到文字下方换行，辅助码一旦下移译文也随之下移；横排译文总在文字下方，每项取自然宽度从左向右排列，放不下的一项起新的一行，只有单项比整行还宽时才收窄到行宽并在其中折行。候选窗宽度以所在屏幕可见区域的一半封顶，预编辑行同样受此限制。
 
 ## 候选学习与跟随光标
 
@@ -256,6 +260,8 @@ AI 候选与候选释义相互独立：与来源的 `ai_eligible` / `UpdateAiInp
 ## 候选窗口翻页按钮与定位
 
 多页候选在卡片顶行右侧显示页码「1 / 3」（12 点等宽数字，可访问标签「第 1 页，共 3 页」）与 `‹` / `›` 鼠标翻页按钮（28×26 点），顶行左侧是预编辑串；横排与竖排相同，翻页按钮不再占用候选行的宽度或竖排底栏。单页不显示，首页/末页禁用越界方向，并提供中文可访问标签。页码和翻页按钮由共享偏好 `show_candidate_page_number`（设置页「候选窗口 → 布局 → 显示页码和翻页按钮」，原生设置窗口候选窗卡片里同名开关）一起控制，默认显示；关掉后两者都不画，键盘翻页照常，鼠标只能用滚轮翻页（`navigation.mouse_wheel`，默认关，需在「按键 › 候选翻页与选字」打开），logo 和窗内拼音也隐藏时卡片没有顶行（#7316）。候选译文固定为 12 点，不随候选字号放大。页码和候选由共享运行时返回，点击分派既有翻页命令；回调校验会话、组合代次、原页面与焦点，防止旧按钮影响新输入。原生测试覆盖实际按钮点击、方向禁用、单页隐藏和过期回调。滚轮翻页对齐 Windows `candidate_wheel_paging.h` 的累加语义：触控板精确滚动累计满 40 点（WebKit 一格滚轮的距离）才翻一页，多格拆成多次翻页，惯性事件不翻页，反向、手势开始、面板隐藏与候选刷新都清空残留；传统滚轮一个事件翻一页。
+
+中文标点开启时，普通中文方案的 `Shift+[` 输入「，`Shift+]` 输入」；`'` 和 `Shift+'` 继续遵循「引号样式」，因此默认弯引号可以与直角引号同时使用。开启「成对标点」时左引号自动补右引号，随后按 `Shift+]` 跨过补出的右引号。注音的既有键位、英文模式、本地模式及英文标点锁定保持各自规则。
 
 共享偏好 `expand_candidates`（设置页「候选窗口 › 布局」或原生设置窗口候选窗口卡片里的「展开候选」，默认关闭，#7307）打开后，横排、多页的候选窗在 `‹` `›` 后面多一个展开按钮（跟着页码和翻页按钮按 `show_candidate_page_number` 显示），组字时按 Tab、↓ 或点它把这一代的全部候选排成多行网格：一行是当前每页候选数，一次最多画 5 行，上下滚动。Tab 只在未按 Shift 且网格确实可展开时进入网格，网格里的 Tab 再滚过可见的几行；Shift+Tab 仍向前翻页。网格里 ←/→ 在行内移动，↑/↓ 在行之间移动，翻页键一次滚过可见的几行，空格和回车选高亮，数字键选高亮那一行里的第几个，Esc 或第一行再按 ↑ 收起而组字保留，鼠标点选、首行收起按钮和滚轮也可用；网格不认的键先收起网格再照常处理。网格打开时经 `msime_client_all_candidates` 复制一次候选，选择用 `msime_client_select_any_candidate` 带着那一代；组字不变而候选换了一代（云候选、AI 回答到达）时按新的一代重载，组字变了就收起。偏好关闭、竖排或只有一页时方向键规则与上文一致，不受影响。决定与取舍见 `.agents/notes/implemented/feature/2026-10-12-macos-expanded-candidate-grid.md`。
 

@@ -164,6 +164,8 @@ char *msime_client_google_loopback(const uint8_t *request, size_t length);
  * {operation:"session_adopt",path?,identity_path?,item:"account"|"anonymous",from:"settings"|"keyboard"} → {outcome:"adopted"|"unchanged"|"cleared",local_unreadable?:true}：只能带 directory（带 session_store 是 account_invalid），给鸿蒙设置应用与键盘两个沙箱之间的会话镜像。path 是另一边发布的会话文件的绝对路径，不给、或文件（连同所在目录）不存在，表示发布方没有这份会话；读它时不跟随符号链接、最多 64 KiB；鸿蒙上文件属主必须是本进程的有效 uid（不看所在目录的属主：发布目录由发布方自己建，看有效 uid 是为了拒收别的 uid 先建好目录再放进的文件；前提是设置应用和键盘是同一个应用的两个进程、有效 uid 相同），只拒绝其他用户位；其他平台与 directory 里的会话文件相同，属主与所在目录相同、只能属主可读写，Native、Apple 和鸿蒙扁平布局都认，读不了或不是合法会话时是 account_storage，本地不动。item 选 directory 里的 account-session.json（登录会话）或 anonymous-session.json（匿名会话）。identity_path 只能和 item:"anonymous" 一起给（和 item:"account" 一起是 account_invalid），是另一边发布的匿名账号身份文件 anonymous-account.json 的绝对路径，读的规则与 path 相同，文件（连同所在目录）不存在表示发布方没有身份，读不了或不是合法身份时是 account_storage，本地不动；给了时身份跟着匿名会话走：结果是 adopted 时，在同一把锁里、写会话之前把 directory 里的 anonymous-account.json 换成发布方的身份，发布方没有身份而采用的会话换了账号（本地原来没有匿名会话、读不了，或 user.id 不同）时删掉本地身份，同一个 user.id 时不动，会话和身份始终属于同一个匿名账号；写会话失败时尽力还原身份；结果不是 adopted 时身份不动。不给 identity_path 时身份文件不动，与加这个字段之前相同。整个决定在 directory 的 account-refresh.lock 里做，与刷新、登录、退出互斥，不联网。两种 item 只看 user.id 和 expires_at，不看 session_id（有没有、相不相同、v4 还是 v8 都一样），规则除下面注明的两处外相同：同一个 user.id 时 expires_at 更晚的胜，from:"settings" 和 from:"keyboard" 都一样，相同时 unchanged；不同的 user.id（换号）时 from:"settings" 直接替换、from:"keyboard" 是 unchanged，设置应用里的换号不会被键盘的旧副本撤销；本地没有会话或读不了时：item:"account" 与换号相同（读不了而没有采用时 outcome 仍是 unchanged，另带 local_unreadable:true：这个结论取决于本地此刻读不读得了，本地恢复可读以后同一份发布物可能就该采用，宿主不能把它记成同一份发布物不用再试；其他结果不带这个字段）；item:"anonymous" 两个方向都是 adopted，用户没打开过设置应用就先启用了键盘时，设置应用第一次启动采用键盘注册的那个匿名账号，不再注册第二个、多用一次注册额度（带 identity_path 时连同键盘的身份）。expires_at 是拿到令牌的时刻加服务端给的固定时长，两个沙箱用同一台设备的时钟，后签发的会话一定过期得更晚，所以刷新过的那份胜过刷新前的、同一个账号重新登录的那份胜过上一次登录留下的：只要另一边给的是更新的那份，session_adopt 不会留下、也不会换回用过的刷新令牌（中间把系统时钟往回调过时除外）。发布方没有会话时：item:"account" 且 from:"settings" 清掉本地会话，与 forget 相同（连同云剪贴板密钥串），本地原来就没有时是 unchanged；item:"account" 且 from:"keyboard" 是 unchanged；item:"anonymous" 两个方向都是 unchanged、本地不动，匿名账号没有退出登录，清掉只会逼着重新注册、用掉每个 IP 每天 5 次的注册额度，所以 cleared 只出现在 item:"account"。采用的会话按 Native 布局原样写进 directory（session_id 照抄，没有的在第一次认证请求前补上）。两个沙箱各用各的锁，两边各自拿同一枚刷新令牌刷新的风险这里消除不了。
  * 其余失败时 error 是账号错误码：account_invalid（请求或参数不合法）、account_unauthorized（未登录或会话失效）、account_rate_limited、account_storage、account_cancelled、account_conflict、account_unavailable、account_blocked_content、account_screening_unavailable、account_banned；只有上面新增的操作和 purpose:"link" 的几步还会返回 account_too_large、account_not_found、account_recent_login_required、account_identity_changed、account_no_verified_email 和 account_network（msime_client_account_chat_stream 另有 account_busy；已有操作的码不变，例如 delete 遇到需要最近登录时仍是 account_unauthorized，断网时仍是 account_unavailable）。除 status、google_cancel、forget、session_adopt 外都会阻塞网络（session_adopt 不联网，但可能等另一个进程的刷新最多 20 秒）：放在工作线程上调用。 */
 char *msime_client_account(const uint8_t *request, size_t length);
+/* 昵称草稿的纯计算，不创建会话、不读文件、不联网。请求最多 16384 字节的 UTF-8 JSON {name, id}，id 是账号 UUID，编辑草稿时可传空串；未知字段、字段类型错误、无效缓冲区和 UTF-8 都返回 account_invalid，不回显输入。Value 为 {normalized, preferred, valid, maximum_chars, maximum_utf16_units}：normalized 按既有设置界面的 JavaScript trim 去首尾空白（含 BOM，不含 U+0085）；valid 直接复用账号改名的校验（规范化后非空、最多 64 个 Unicode 码点、没有控制字符）；preferred 在 normalized 为空时是「水杉小鹿·」加 id 前六个字符的大写，否则就是 normalized。空白或不合法的草稿仍成功返回，只把 valid 设为 false；宿主只可提交 valid 为 true 时的 normalized。maximum_utf16_units 是容纳 maximum_chars 个码点所需的 UTF-16 单元上限（当前 128），给控件限制输入长度；实际合法性只看 valid。 */
+char *msime_client_account_name(const uint8_t *request, size_t length);
 /* 流式对话（#8201 的决定 15）：与 msime_client_account 的 chat 相同的请求、预检和会话选择，只是以 stream:true 请求 POST /v1/chat/completions，回复每到一段就交给 on_delta，并且能取消。request 最多 1 MiB：{directory?|session_store?, legacy_directory?, client_agent?, request_id, messages, model}，directory、legacy_directory、client_agent、session_store 与 msime_client_account 相同（恰好给 directory 或 session_store 之一）；request_id 是宿主为这次对话取的 1–96 个 [A-Za-z0-9_-]，取消时用它；messages、model 与 chat 相同，序列化后超过 65536 字节是 account_too_large。登录账号优先，没有登录时用本机匿名账号，与 chat 相同；服务端以 401 拒绝令牌时刷新一次、在同一个账号里重试，被拒的那次没有交出增量。
  * on_delta 可为 NULL；否则每收到一段非空的增量就在调用本函数的线程上调用一次：text 是这段增量的 UTF-8 字节（length 个，不以 NUL 结尾，不会把一个字符拆在两段里），只在回调期间有效；按到达顺序依次调用，不会并发，本函数返回以后不会再调用。回调里不得重入 msime_client_*，唯一的例外是 msime_client_account_chat_cancel（调用回调时 Rust 不持有登记表的锁，也不持有会话锁）。增量可能只有空白；所有增量连起来就是成功时的 content。
  * 成功时 Value 是 {content}，整段回复，最多 16 KiB，与 chat 相同。不认识 stream 的旧后端回 400 invalid_chat_request 时退回非流式请求，整段回复作为一段增量交出；服务端回了 200 却不是 text/event-stream 时同样按非流式的 JSON 读。失败时 error 是账号错误码，与 chat 相同的规则：开始输出之前的失败带状态码的细节（被限流是 account_rate_limited，带 retry_after_seconds；503 server_busy 也是带 retry_after_seconds 的 account_rate_limited；没拿到响应是 account_network；5xx 是 account_unavailable）。开始输出以后：服务端发来上游失败的事件（data: {"error":...}）、回复超过 16 KiB、含换行、回车和制表符以外的控制字符、或只有空白就结束时是 account_unavailable；没等到 data: [DONE] 连接就断开、读到一半出错或到了 125 秒的总时限时是 account_network；这两种情况下已经交出的增量不收回，宿主自己决定留不留。同一个 request_id 正在进行时是 account_busy，原来那次不受影响。回答完整以后与 chat 一样核对给出令牌的账号，期间退出或换了号时是 account_cancelled，这时增量已经交出去了，宿主要丢掉它们。
@@ -225,6 +227,9 @@ char *msime_client_cloud_dictionary(const uint8_t *request, size_t length);
  * installers ship (<kind>/<id>/ folders: the uuid script plugin, the latex-symbols phrase
  * table); absent means plugin-packs beside the built-in sound packs, and nothing when that
  * directory is not there (mobile, development builds without them).
+ * 可选 helpcode_fallback_resources 是随包资源的绝对根目录。仅主资源缺少内置辅助码表时
+ * 才从这里读取 helpcodes/；已有表、自定义表和插件表继续优先。宿主可仅在内存配置中
+ * 注入此键，避免旧版宿主读取不认识的持久化键。
  * Do not delete .msime-dictionary-access.lock files. Legacy/external writers do
  * not participate; preparation/upgrades still require stopped sessions.
  */
@@ -420,6 +425,35 @@ char *msime_client_skin_catalog(const uint8_t *directory, size_t length);
 char *msime_client_helpcode_schemas(const uint8_t *resources, size_t length);
 /* JSON {directory:absolute skin root,id:package folder}. Validates that one package with the same loader as msime_client_skin_catalog and returns one of its camelCase packages entries; an invalid, built-in, symlinked or missing package is {ok:false,error} with the loader's reason. Reads the package: resolve on a skin or appearance change, never while drawing. */
 char *msime_client_skin_package(const uint8_t *request, size_t length);
+
+/* 图片工具栏的无 I/O 布局。请求 {toolbar: 扫描缓存中的 toolbarImage,
+   shown: [[按钮键, 当前状态], ...]}，最多 7 个当前显示按钮；皮肤只能进一步隐藏。
+   返回 {widthDip,heightDip,buttons:[{key,xDip,yDip,widthDip,heightDip,iconSizeDip,
+   background,image}]}，尺寸覆盖背景与全部按钮。失败不能继续使用旧命中区。
+   UTF-8 JSON 最多 64 KiB；结果用 msime_client_string_free 释放。 */
+char *msime_client_skin_toolbar_image_layout(const uint8_t *request, size_t length);
+/* 同步解码有界内存中的 PNG/APNG 默认图或 GIF/JPEG/WebP 首帧，不读文件。
+ * 输入最多 8 MiB，边长最多 2048。成功时只调用一次回调，rgba 为非预乘 RGBA8，
+ * length = width * height * 4。字节只在回调期间有效，宿主必须当场复制；回调不得抛异常。
+ * 只有回调返回 1 时整个调用返回 1；其他回调值返回 0。
+ * 坏图、空指针和超限返回 0，且不调用回调。
+ * 只能在皮肤资源变化时加载，不能在逐键绘制中解码；这不是动画播放接口。 */
+typedef int32_t (*msime_client_skin_image_callback)(void *context, const uint8_t *rgba,
+                                                   size_t length, uint32_t width, uint32_t height);
+int32_t msime_client_skin_image_decode(const uint8_t *bytes, size_t length,
+                                      msime_client_skin_image_callback on_frame, void *context);
+/* 同步解码整张 PNG/APNG、GIF、JPEG、WebP，全部验证成功后才按序回调。
+ * 每帧为完整画布，像素格式、借用期和线程要求与单帧接口一致；最多 120 帧、800 万像素。
+ * index 从 0 开始，count 为总帧数；delay_ms 是该帧持续时间，静态图为 0。
+ * play_count 是完整播放次数，0 表示无限；有限播放结束保持末帧。
+ * GIF 无循环声明时播放一次；APNG/GIF <=10ms 归一化为 100ms；WebP 多帧固定 100ms 无限。
+ * 坏图、空指针和超限返回 0 且无回调。任一回调不返回 1 时停止并返回 0，宿主须丢弃已收帧。
+ * 宿主必须对同一包的不同图片累计像素预算；不能在逐键绘制中调用。 */
+typedef int32_t (*msime_client_skin_animation_callback)(void *context, const uint8_t *rgba,
+    size_t length, uint32_t width, uint32_t height, uint32_t index, uint32_t count,
+    uint32_t delay_ms, uint32_t play_count);
+int32_t msime_client_skin_animation_decode(const uint8_t *bytes, size_t length,
+    msime_client_skin_animation_callback on_frame, void *context);
 /* JSON {directory:absolute path,id:skin id,relative:package asset,kind:"image"|"font"}.
  * Returns {contentType,bytes}; the manifest and package containment are
  * revalidated for every call and the requested kind must match the asset. */
@@ -431,6 +465,8 @@ char *msime_client_skin_toolbar_stylesheet(const uint8_t *request, size_t length
  * folder under its own name, replacing a skin of that name whole; returns {id}.
  * The error message is skin_name, skin_manifest or storage. Touches the disk. */
 char *msime_client_skin_import(const uint8_t *request, size_t length);
+/* The shared settings page's 「制作皮肤」, ruled by client-services skin::candidate_editor. JSON {operation:"check",package_id,manifest,files} reads the draft with the catalog loader in a scratch folder, without touching the skin root, and returns the camelCase package entry msime_client_skin_catalog would list (a template manifest such as base = "wechat" with no files resolves that look's colours). {operation:"create",directory:absolute skin root,package_id, manifest,files,replace} installs it with the installer community downloads and MCP use and returns {id,replaced}. files maps package-relative image paths to standard base64. A refusal is {ok:false,error,detail?}: error is a candidate_skin_* code or storage (candidate_skin_exists when the id is taken and replace is false), detail the loader's reason when the manifest did not load. Requests may be up to 4 MiB. Decodes images and touches the disk: use a worker. */
+char *msime_client_candidate_skin_editor(const uint8_t *request, size_t length);
 /* The queued personal dictionary, for a host that cannot take the Engine's
  * maintenance lock when the request arrives. Same request shape as
  * msime_client_dictionary - {options,action} - but the operations act on
@@ -514,6 +550,23 @@ char *msime_client_focus(uint64_t session, bool focused);
 char *msime_client_reset_cache(uint64_t session);
 /* Release process-level model caches without a session handle (memory pressure). */
 void msime_client_release_process_cache(void);
+/* 语音设置服务目录。纯函数，无文件、网络或设备访问；响应 value 为 {asr:[preset],polish:[preset],doubao_stream_endpoints:[{id,label,title,endpoint}]}。
+ * preset 为 {id,title,endpoint,model,models:[string],documentation}，仅含公开预设。
+ * 数组顺序即设置页顺序；不含平台特有的 system/local，宿主按能力追加。
+ * models 仅作建议，不限制用户自定义模型。宿主复制字段后用 msime_client_string_free 释放返回的 JSON 缓冲区。 */
+char *msime_client_voice_provider_catalog(void);
+/* 切换语音服务的纯函数；请求 <=1 MiB：{service:"voice.asr"|"voice.polish",provider:string,
+ * current:{provider?,endpoint?,model?,token?,tokens?:{id:string}},field_policy?:"fill_defaults"|"clear"}。
+ * current 缺少的字段按空值处理。field_policy 缺省为 fill_defaults，只替换空白或出厂值；clear 在换服务时清空地址和模型。
+ * value 为 {provider,token,tokens,endpoint?,model?}：省略地址/模型表示保留原值，空串表示清空。
+ * 不读写偏好、不联网；宿主负责把补丁字段映射到 asr_ 或 polish_ 并保存。
+ * 请求和返回含凭据，禁止记录；返回缓冲区用 msime_client_string_free 释放。 */
+char *msime_client_voice_provider_update(const uint8_t *request, size_t length);
+/* 语音设置接口预检；输入是 <=64 KiB 的 UTF-8 地址，websocket 为 true 时按 wss 校验，否则按 https 校验。
+ * 首尾空白与运行时解析一样去除，空地址表示使用默认值；非空地址复用运行时的 2048 字节和 URL 形状规则，并保留移动宿主的小写协议、无 @ 限制。
+ * value 为 {accepted:boolean,issue:string|null}；失败提示固定，不回显输入，不访问偏好或网络。
+ * 空引用、超限和非法 UTF-8 返回错误；返回缓冲区用 msime_client_string_free 释放。 */
+char *msime_client_voice_endpoint_issue(const uint8_t *endpoint, size_t length, bool websocket);
 char *msime_client_voice_start(uint64_t session);
 char *msime_client_voice_cancel(uint64_t session);
 /* Capture bounded mono 16 kHz samples. The JSON result is transient audio and
@@ -550,7 +603,7 @@ char *msime_client_voice_local_model_cancel(const uint8_t *request, size_t lengt
 char *msime_client_voice_local_model_remove(const uint8_t *request, size_t length);
 char *msime_client_voice_model_setting_check(const uint8_t *request, size_t length);
 /* 按需资源包存放在 <state_root>/resource-packs/<id>/；state_root 是 HostOptions 的 preferences_directory（Android: files/bootstrap/state），会话下次取得焦点时读取新发布的包。
- * 包 id：japanese、language-dictionaries、handwriting、settled-model、offline-glosses、voice-runtime。请求为 length 字节的 JSON（<=16384），响应使用标准封装。install 和 adopt 是阻塞调用，只能放在工作线程。
+ * 包 id：japanese、language-dictionaries、handwriting、settled-model、offline-glosses、voice-runtime、wubi、voice-runtime-macos（锁文件固定了重签的 macOS 运行库之后才有）。请求为 length 字节的 JSON（<=16384），响应使用标准封装。install 和 adopt 是阻塞调用，只能放在工作线程。
  * 错误为 "invalid resource pack request"、"invalid state root"、"invalid source"、"resource_pack_unknown"、"resource_pack_busy"（本进程正在安装或收编该包）或 "local_model_*"。
  * resource_packs: {state_root} -> [{id, state:"missing"|"installed"|"outdated", size, schemes:[...], import_files:[{name,url,size}]}]，每包一项；size 为下载字节数，import_files 为离线安装所需文件（voice-runtime 使用归档），url 为上游下载地址。
  * resource_pack_install: {state_root, pack, sources?:["https://mirror/", ...], files?:[absolute path]} -> {path}。
@@ -728,7 +781,7 @@ char *msime_client_punctuation_ascii(uint64_t session, uint8_t ascii);
  * Stroke: only h s p n z start a composition; x and other letters return handled=false while idle, so a host inserts them as usual. While composing x appends a wildcard, other letters are swallowed with handled=true, and digits 1-9 pick candidates. View.reading and View.preedit hold the stroke glyphs 一丨丿丶乛＊, one per typed letter, which a host draws inline; editing_text and caret_position count the ASCII letters. MSIME_COMMIT_RAW commits the typed letters, MSIME_COMMIT_CANDIDATE the highlighted character (the letters when there is none), and focus loss does not commit.
  * MSIME_OPEN_CANDIDATE_LIST is MSIME_CONVERT_HANJA under the name that says what it does in every scheme: open the active scheme's candidate list. Korean opens and closes its Hanja list as described above; Zhuyin opens the candidate list of its composition; every other scheme answers handled=false. */
 /* View.display_reading 是宿主画在行内的读音。日文罗马字（scheme 3，非本地模式、非英文）组字时末尾单个 n 还没定成ん，这里留作字母（kan 是 かn，kann 才是 かん），与微软、Google 日文输入法一致；其余方案和状态下与 View.reading 相同。View.reading 仍是 MSIME_COMMIT_READING 上屏的读音，末尾的 n 在那里已是ん。宿主不经引擎结束组字区时：光标被移走、编辑器仍报告着组字区，应把组字区换成 View.reading 再结束；确认不了组字区还在（编辑器报告没有组字区、会话停下）时只结束组字，不要把 View.reading 写进可能已被应用清空或改写的输入框，这时文档里可能留下画出的读音。只读 View.reading 的宿主行为不变。 */
-/* 整句改字（全拼、双拼）：桌面宿主把不带修饰键的左右方向键发成 MSIME_CONVERSION_LEFT / MSIME_CONVERSION_RIGHT，Ctrl+左右发成 MSIME_MOVE_LEFT / MSIME_MOVE_RIGHT 编辑拼音字母。首选是一个字对一个完整音节、覆盖整个组字、至少两个字的句子时，MSIME_CONVERSION_LEFT 进入改字：View.conversion 是整句，光标在 View.conversion_focus_start 个字（Unicode 标量）之前，conversion_focus_start..conversion_focus_end 是候选所替换的那一段，候选换成这一段（先是光标所在的词，再是更短、更长的）的字和词。之后左右键每次移一个字，最远到句末（focus_start 等于字数，没有候选）。选中候选（数字、MSIME_COMMIT_CANDIDATE、msime_client_select）把这段钉住，句子其余部分围绕它重新转换，光标移到这段后面，不上屏；光标在句末时 MSIME_COMMIT_CANDIDATE 上屏整句。MSIME_COMMIT_RAW、MSIME_FINISH_COMPOSITION、标点和失去焦点上屏改好的整句，不是拼音字母。MSIME_CANCEL 和 MSIME_BACKSPACE 只退出改字回到拼音（组字保留，钉住的段丢掉）；键入字母或撇号、Ctrl+左右、Home/End 先退出改字再照常处理。进不了改字时（读音不完整、单字、光标在拼音中间、其他方案、本地模式）这两条命令就是 MSIME_MOVE_LEFT / MSIME_MOVE_RIGHT。改字期间宿主把 View.phrase_prefix 加 View.conversion 画在行内代替拼音，不管预编辑样式选的是什么；改字的候选不能置顶、删除或固定位置。 */
+/* 整句改字（全拼、双拼）：桌面宿主把不带修饰键的左右方向键发成 MSIME_CONVERSION_LEFT / MSIME_CONVERSION_RIGHT（macOS 不进改字，发 MSIME_MOVE_LEFT / MSIME_MOVE_RIGHT）；Shift+左右和 Ctrl+左右在所有方案里都发 MSIME_MOVE_LEFT_SEGMENT / MSIME_MOVE_RIGHT_SEGMENT，按音节移动拼音光标。偏好 navigation.left_right 打开时，横排候选窗里不带修饰键的左右键可能被换成移动候选（高亮不在首选，或首选上光标已在末尾时按右键），分段命令从不被换，所以高亮在哪个候选上它们都编辑拼音。首选是一个字对一个完整音节、覆盖整个组字、至少两个字的句子时，MSIME_CONVERSION_LEFT 进入改字：View.conversion 是整句，光标在 View.conversion_focus_start 个字（Unicode 标量）之前，conversion_focus_start..conversion_focus_end 是候选所替换的那一段，候选换成这一段（先是光标所在的词，再是更短、更长的）的字和词。之后左右键每次移一个字，最远到句末（focus_start 等于字数，没有候选）。选中候选（数字、MSIME_COMMIT_CANDIDATE、msime_client_select）把这段钉住，句子其余部分围绕它重新转换，光标移到这段后面，不上屏；光标在句末时 MSIME_COMMIT_CANDIDATE 上屏整句。MSIME_COMMIT_RAW、MSIME_FINISH_COMPOSITION、标点和失去焦点上屏改好的整句，不是拼音字母。MSIME_CANCEL 和 MSIME_BACKSPACE 只退出改字回到拼音（组字保留，钉住的段丢掉）；键入字母或撇号、Shift/Ctrl+左右、Home/End 先退出改字再照常处理。进不了改字时（读音不完整、单字、光标在拼音中间、其他方案、本地模式）这两条命令就是 MSIME_MOVE_LEFT / MSIME_MOVE_RIGHT。改字期间宿主把 View.phrase_prefix 加 View.conversion 画在行内代替拼音，不管预编辑样式选的是什么；改字的候选不能置顶、删除或固定位置。 */
 enum MsimeCommand {
     MSIME_BACKSPACE = 0, MSIME_COMMIT_CANDIDATE = 1, MSIME_COMMIT_RAW = 2,
     MSIME_CANCEL = 3, MSIME_MOVE_LEFT = 4, MSIME_MOVE_RIGHT = 5,
@@ -746,7 +799,9 @@ enum MsimeCommand {
     MSIME_FINISH_ON_FOCUS_LOSS = 20,
     MSIME_NEXT_PAGE = 100, MSIME_PREVIOUS_PAGE = 101,
     MSIME_NEXT_CANDIDATE = 102, MSIME_PREVIOUS_CANDIDATE = 103,
-    MSIME_FIRST_CANDIDATE = 104, MSIME_LAST_CANDIDATE = 105
+    MSIME_FIRST_CANDIDATE = 104, MSIME_LAST_CANDIDATE = 105,
+    /* 候选窗显示时的 Home 键：高亮不在首选时同 MSIME_FIRST_CANDIDATE；已经在首选、输入串非空、没有打开的候选列表（韩文汉字、注音）且不在整句改字时同 MSIME_MOVE_HOME；整句改字时一直同 MSIME_FIRST_CANDIDATE，不退出改字。宿主只在 Home 键上发它；需要「无条件回到首选」的地方（日文转换循环候选）仍发 MSIME_FIRST_CANDIDATE。 */
+    MSIME_FIRST_CANDIDATE_OR_HOME = 106
 };
 char *msime_client_command(uint64_t session, uint32_t command);
 /* Re-rank the visible candidates with the settled model, once the host's typing pause elapses.
@@ -795,13 +850,11 @@ char *msime_client_english_completions(uint64_t session, const uint8_t *prefix,
  * 中文标点下 '\'' 与 '"' 出哪种引号、'[' ']' 出哪种方头括号由偏好 quote_style、bracket_style 决定（契约 shared/contracts/punctuation 的 styles 段）。View.punctuation_marks 报告引擎已应用的样式：{"quotes": "curly"|"corner", "brackets": "solid"|"hollow"}，corner_when_traditional 已按繁体输出开关解析成 curly 或 corner。宿主做成对补全、跨过后半个、空格转换、英文模式下的中文标点和画触屏键面时读它，不自己解析偏好；改了偏好要等空闲重建后它才变，和引擎出字同步。
  */
 char *msime_client_view(uint64_t session);
-/* Return a copied OnlineQuery JSON object, or null when the current composition
- * is not eligible for an online provider. Linux responses may include the
- * validated ai_assistant provider/model/prompt configuration (never its token).
- * The document also carries the validated cloud_candidates preference so a
- * user-owned provider can distinguish cloud suggestions from AI suggestions.
- * The caller may perform provider work off-thread and pass the unchanged
- * document back to apply_online_candidate. */
+/* 在线候选查询包含 cloud_request（GET/POST、请求头、JSON 请求体、超时、响应格式和可选缓存回包）。
+ * 描述符可能含自定义服务凭据，只交给宿主传输，不写日志或上传诊断。
+ * 各接收 OnlineQuery 的接口最多接受 128 KiB UTF-8 JSON；候选列表与回包沿用各自上限。
+ * 云与 AI 共用这份查询，宿主在后台执行后原样交回，组字或来源变化会拒绝迟到结果。 */
+#define MSIME_ONLINE_QUERY_MAX_BYTES 131072
 char *msime_client_online_query(uint64_t session);
 /* Build a validated AI HTTP descriptor for a copied OnlineQuery. The host
  * resolves credentials from its current preferences; the query must still
@@ -819,21 +872,13 @@ char *msime_client_set_ai_credential(uint64_t session, const uint8_t *token,
  * While the composition is a /fy request (command mode) the query is that request alone, whatever the gloss switches say: sentence:true, target_language "zh", one candidate {text, online_gloss:false} holding the English typed after the command, no resources, user_data or offline_gloss_languages, and null when no service of the user's own (tencent, niutrans or custom) is selected. Ask only that service, without the offline dictionary or the gloss cache, and hand the answer back through msime_client_apply_translations, which shows it as the first row and commits the translation.
  */
 char *msime_client_translation_query(uint64_t session);
-/* How long a cloud candidate is worth waiting for: connecting, and in total.
- * Mirrors client-core's cloud::candidates, which takes them from the reference,
- * whose cloud worker gives every phase of the request 2000 ms. A host must not
- * choose its own: a reply arriving after a private deadline is one the
- * reference would have shown.
- */
+/* Google 的默认预算；cloud_request 存在时按描述符中的毫秒预算执行。 */
 #define MSIME_CLOUD_CONNECT_TIMEOUT_MS 2000
 #define MSIME_CLOUD_REQUEST_TIMEOUT_MS 2000
-/* Build the bounded HTTPS cloud URL for an eligible OnlineQuery. The native
- * host performs network I/O and applies the copied result separately. */
+/* 兼容 GET 云候选的 URL 入口；POST 宿主直接执行 OnlineQuery.cloud_request。 */
 char *msime_client_cloud_request_url(const uint8_t *query, size_t query_length);
-/* Parse a host-fetched response using the shared cloud parser. Returns
- * {applied,view}; no-result/malformed provider documents do not mutate input.
- * Query <=16 KiB, response <=256 KiB. Stale queries and disabled cloud
- * preferences (including a pending disable) cannot apply candidates. */
+/* 共享解析器处理宿主取得的云响应，返回 {applied,view}；空或无效响应不改变组字。
+ * 查询最多 128 KiB，响应最多 256 KiB。过期、关闭或切换来源的查询不应用候选。 */
 char *msime_client_apply_cloud_response(uint64_t session,
                                       const uint8_t *query, size_t query_length,
                                       const uint8_t *body, size_t body_length);
@@ -1065,7 +1110,7 @@ bool msime_client_music_set_active(uint64_t session, bool active);
  *   MSIME_LIFECYCLE_COMMIT_OBSERVE_ONLY：之后的上屏只能观察、不能改写，可随时切换。TIP 已经从自己的会话把文字写进文档的路径（Windows），Server 在派发前设上、派发后清掉。设着它时脚本插件的候选变换也停下：派发里不运行 candidates，旁路调用也不重放之前的重排、隐藏和注释，列表保持引擎和内置排序的顺序。TIP 在自己的会话里选词的列表（注音等 AlwaysInlinePreedit 方案）按那个会话的顺序选，Server 一侧重排或隐藏就会让显示的顺序和数字选中的对不上，所以这类列表的每一次派发都要设着它。
  *   MSIME_LIFECYCLE_HOST_HOLDS_PIECES：宿主自己暂存部分选词（Windows），补齐整个词时才把各段拼好写进文档。这样的会话里每次部分选词都是一次上屏，commit 事件按段投递，插件读到的 commit 只是这一段；这个词的各段，包括补齐它的那一段，before_commit 都不可改写。部分选词上屏的那一段还在宿主手里、没进文档，FEEDBACK 不为它出上屏音、不画上屏特效（transition 的 feedback 为 0），整段送出的那次上屏再出；生命周期事件照常发。
  * 顺序契约。轮次：宿主每把一个物理按下交给输入法，都要在为这个键调用任何派发之前先调一次 msime_client_key，它开启新的一轮；到下一次 msime_client_key 之前的所有派发和 focus 调用都属于这一轮，同一个键可能触发多次派发（如 Windows 对同一个键再发一次 MSIME_CANCEL）。指针点选和翻页先调 msime_client_key(session, MSIME_KEY_POINTER)。带 MSIME_KEY_PASSTHROUGH 的键（Windows 交给应用、由 TIP 经 Aux 管道异步上报的键）不开新的一轮，也不承诺先于应用处理。所以"打字前"只承诺先于本轮的第一次派发。
- *   过渡期的例外：msime_client_key 还没有"开一轮但不出声"的位，所以 Linux 的 IBus 和 Fcitx5 宿主只为会出按键音的打字键调用它。松开、单独的修饰键、带 Ctrl/Alt/Super 的组合键、录音中的键和 IBus 屏幕键盘面板送来的键都不开新的一轮，它们引起的派发（如组字中按 Ctrl 组合键发出的 MSIME_FINISH_COMPOSITION 或 MSIME_CANCEL、单按 Shift 切换中英文时的 MSIME_COMMIT_RAW）算在上一轮里。第 3 阶段按轮计 fuel 的脚本运行时不会因为这类没有先调 msime_client_key 的派发熔断；补上这个位之后，宿主再为这些按下也调用它，让它们各自成一轮。
+ *   过渡期的例外：msime_client_key 还没有"开一轮但不出声"的位，所以 Linux 的 IBus 和 Fcitx5 宿主只为会出按键音的打字键调用它。松开、单独的修饰键、带 Ctrl/Alt/Super 的组合键、录音中的键和 IBus 屏幕键盘面板送来的键都不开新的一轮，它们引起的派发（如组字中按 Ctrl 组合键发出的 MSIME_FINISH_COMPOSITION 或 MSIME_CANCEL、单按 Shift 切换中英文时的 MSIME_COMMIT_RAW）算在上一轮里。第 3 阶段按轮计 fuel 的脚本运行时不会因为这类没有先调 msime_client_key 的派发熔断；补上这个位之后，宿主再为这些按下也调用它，让它们各自成一轮。按住不放产生的自动重复不出声、不画（与 macOS 宿主一样），但每次重复都会派发，所以两个 Linux 宿主为它借 msime_client_key(session, MSIME_KEY_POINTER) 开新的一轮；macOS 宿主目前不为自动重复调用 msime_client_key，自动重复引起的派发算在第一次按下那一轮里。
  * 同一次调用内的事件顺序：input（派发前）→ selection_retracted → candidate_selected → before_commit → commit → composition_end 或 composition_start → composition_update → candidates_shown 或 candidates_hidden，每次调用最多一个候选事件。focus 调用没有 input，focus_in/focus_out 排在它自己的上屏和组字结束之后；失焦上屏一律不可改写。destroy 先发 composition_end{Destroyed}，最后是会话结束。组字状态只在调用边界前后各采样一次。一次 transition 同时带着上屏和新组字时（韩文音节延续）只发 commit{continues}，不发 end 和 start。apply_online_*、resolve_online_candidates、clear_online_candidates、apply_cloud_response、rerank_settled、apply_translations 这些旁路调用，以及 set_english_mode、set_chinese_punctuation、set_punctuation_lock、update_preferences、set_ai_credential 这些可能在组字中途改动组字或候选的设置调用，只给核心发视图类事件（composition_end{Other}、candidates_shown/hidden 等）。派发、focus 和上面这些调用报错时照样推导事件：runtime 可能在报错前已经结束或改动了组字，start 和 end 始终成对。事件不带文本，也不写进任何逐键记录。
  * Windows TIP 会话的约束：TIP 在应用进程里自己的会话只给 Server 转述，不调用以下任何一个函数；字段属性和激活由 Server 的会话报告。
  * msime_client_key：key 的位 0-6 是按键类别 0-3（同 key_sound），位 7（MSIME_KEY_POINTER）是指针调用，类别被忽略，不出声不画；位 8（MSIME_KEY_REPEAT）是自动重复，画但不计连击；位 10（MSIME_KEY_PASSTHROUGH）见上。其余位忽略，类别超出 0-3 时什么都不做。返回值是 FEEDBACK 下这个键的打字特效，位布局同 msime_client_typing_effect；没开 FEEDBACK 时为 0。
@@ -1119,7 +1164,7 @@ char *msime_client_music_pack(const uint8_t *request, size_t length);
 char *msime_client_plugins(const uint8_t *request, size_t length);
 /* 不带编码的常用语（<=4 MiB）：{directory: 偏好目录的绝对路径, action:{operation:"load"|"add"{text}|"remove"{id}|"replace"{id,text}|"move"{id,index}|"install_pack"{resource}|"remove_pack"{id}}}。Value 是整份文档 {phrases:[{id,text,pack}],packs:[{id,name,revision}],skipped?}；错误是固定的代码（common_phrases_io、_corrupt、_invalid、_duplicate、_limit、_too_large、_not_found）。设置进程和键盘进程都会调用，调用时锁住文件。在工作线程上调用。 */
 char *msime_client_common_phrases(const uint8_t *request, size_t length);
-/* 具名词库集合（<=17 MiB）：{options: 带 preferences_directory 的 HostOptions, action:{operation:"load"|"create"|"rename"|"delete"|"set_enabled"|"add_words"|"remove_words"|"import"|"install_community"|"queue_words"{entries}|"flush"|"third_party_matches"{entries}, ...}}，格式见 client-services 的 dictionary::collections；import 的 format 为 "scel"（搜狗细胞词库）时文件按 base64 放在 bytes_base64（不超过 8 MiB），不带 text，结构损坏时是 import_malformed；queue_words 把不属于任何集合的词（本地备份恢复的个人词库，每次最多 20000 个）排进待发送队列，value 带 queued；third_party_matches 只读地核对最多 128 个准备发布到社区的词，value 的 third_party_matches 是其中出现在搜狗细胞词库导入的集合里的下标。词条经个人词库队列传过去，键盘在下一次会话时应用。Value 是集合视图；错误是固定的代码（collections_*、builtin_locked、unsupported_format、import_*、personal_dictionary_*）。在工作线程上调用。 */
+/* 具名词库集合（<=17 MiB）：{options: 带 preferences_directory 的 HostOptions, action:{operation:"load"|"create"|"rename"|"delete"|"set_enabled"|"add_words"|"remove_words"|"import"|"install_community"|"queue_words"{entries}|"flush"|"synchronize"|"third_party_matches"{entries}, ...}}，格式见 client-services 的 dictionary::collections；import 的 format 为 "scel"（搜狗细胞词库）时文件按 base64 放在 bytes_base64（不超过 8 MiB），不带 text，结构损坏时是 import_malformed；queue_words 把不属于任何集合的词（本地备份恢复的个人词库，每次最多 20000 个）排进待发送队列，value 带 queued；third_party_matches 只读地核对最多 128 个准备发布到社区的词，value 的 third_party_matches 是其中出现在搜狗细胞词库导入的集合里的下标。词条经个人词库队列传过去，键盘在下一次会话时应用。synchronize 在 budget_millis（1–2000，默认 2000）毫秒软预算内逐批应用个人队列并补充待发项，每批至多 128 项并释放维护租约，返回 {synchronized,pending_count,failed_count,snapshot_error,sent}，pending_count 包括未发送的集合条目；普通操作的 Value 是集合视图；错误是固定的代码（collections_*、builtin_locked、unsupported_format、import_*、personal_dictionary_*）。在工作线程上调用。 */
 char *msime_client_dictionary_collections(const uint8_t *request, size_t length);
 /* 诊断包（<=65536 字节）：{state_root: 偏好目录, include:{crash_logs,performance_logs,input_events,config_snapshot}, sources:{crash_logs,performance_logs,input_events: 绝对路径|null}, destination: .zip 的绝对路径|null}。输入事件和性能记录只有恰好是 {t_ms, kind (key_down|key_up|candidate_shown|candidate_selected|commit|backspace|panel_open|panel_close|ime_start|ime_finish|input_failure_runtime_rejected|input_failure_invalid_response|input_failure_editor_rejected|input_failure_jni_link), duration_ms} 时才保留，带其他任何键（text、key、candidate……）的整行都丢掉并计数。崩溃记录只保留异常类型和栈帧：异常说明可能带着正在输入的文字，message 只留冒号前的异常类型，stack 的说明行同样处理，路径只留文件名。input_failure_* 仅供本地诊断，云端上传器须按服务端白名单过滤。配置快照把所有凭据换成 "<redacted>"。给了 destination 时写出 zip，value 是 {path,bytes,counts}；没给时 value 是 {counts,sections}，sections 是上传请求体的对象（crash_logs、perf_trace、input_events、config_snapshot）。错误：diagnostics_invalid、diagnostics_source、diagnostics_preferences、diagnostics_write。在工作线程上调用。 */
 char *msime_client_diagnostic_bundle(const uint8_t *request, size_t length);

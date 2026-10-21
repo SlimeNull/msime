@@ -45,6 +45,7 @@ schemes:
     build:
       targets:
         MSIMEClientUITests: all
+        MSIMEKeyboardTestHost: all
     test:
       targets:
         - MSIMEClientUITests
@@ -52,7 +53,7 @@ targets:
   MSIMEApp:
     type: application
     platform: iOS
-    # 只放 INFOPLIST_KEY_* 表达不了的键：两个 URL scheme（键盘扩展里没有 UIApplication,它要打开本应用只能走一个自己注册的 scheme；另一个是 Google 登录的回调）、Google 登录的两个 client ID、ATS 的局域网例外和界面语言的声明。
+    # 只放 INFOPLIST_KEY_* 表达不了的键：两个 URL scheme（键盘扩展里没有 UIApplication,它要打开本应用只能走一个自己注册的 scheme；另一个是 Google 登录的回调）、Google 登录的两个 client ID、ATS 的局域网例外、界面语言的声明和后台音频模式。
     # 其余的键仍由 GENERATE_INFOPLIST_FILE 和下面的 INFOPLIST_KEY_* 合进来。
     info:
       path: App/Resources/Info.plist
@@ -74,9 +75,14 @@ targets:
         # 界面只有中文，所以界面里内嵌的系统控件（Sign in with Apple、`ContentUnavailableView.search`、系统弹出面板）也要请求中文；不声明本地化时，不管设备语言是什么，它们都会回落到英文的开发区域。
         CFBundleDevelopmentRegion: zh-Hans
         CFBundleLocalizations: [zh-Hans]
+        # 按住空格说话：键盘扩展不能录音，App 在后台保持录音会话，替键盘录音识别（App/Services/VoiceSessionService.swift）。会话空闲 5 分钟自动关闭。
+        UIBackgroundModes: [audio]
     sources:
       - path: App/Sources
       - path: App/Services
+      - path: KeyboardExtension/Sources
+        includes:
+          - input/FourteenKeyLayout.swift
       - path: ../../shared/backend
         excludes:
           - Tests/**
@@ -133,6 +139,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.msime.ios
         PRODUCT_NAME: MSIMEApp
+        # 明确声明手机和平板，避免不同版本的 XcodeGen 默认值变化把 iPad 降级成 iPhone 兼容模式；平板设置分栏和键盘形态只有在真实 iPad idiom 下才会运行。
+        TARGETED_DEVICE_FAMILY: "1,2"
         # 发布时由 upload-testflight.sh 在命令行传入描述文件名，配合 CODE_SIGN_STYLE=Manual 让 App 与键盘各用各的 App Store 描述文件；本地开发不传，值为空，仍是自动签名。
         PROVISIONING_PROFILE_SPECIFIER: "$(MSIME_IOS_APP_PROFILE)"
         # 出口合规：只用系统提供的 HTTPS 等豁免加密。写进 Info.plist 后上传的构建自带答案，不会停在 App Store Connect 的「缺少合规信息」而无法分发给 TestFlight 测试组（此前每个构建都在网页上手动答「否」）。
@@ -247,8 +255,17 @@ targets:
         buildPhase: resources
         type: folder
         optional: true
+      # Staged by stage-resources.sh beside EngineResources: the settings app reads 背单词's bundled wordbooks from the wordbooks/ sibling of the EngineResources it finds in the keyboard extension. Empty when none were built.
+      - path: ../../target/ios/wordbooks
+        buildPhase: resources
+        type: folder
+        optional: true
       - path: SharedResources/KeyboardBrand.png
         buildPhase: resources
+      # 表情面板的水杉娘表情包：66 张 320px 透明 WebP 和清单，三个手机键盘共用仓库里的同一份。
+      - path: ../../resources/stickers
+        buildPhase: resources
+        type: folder
       - path: SharedResources/PrivacyInfo.xcprivacy
         buildPhase: resources
     settings:
@@ -285,6 +302,11 @@ targets:
         optional: true
       # Staged by stage-resources.sh beside EngineResources, where host-api looks for the Cantonese and Zhuyin dictionaries; empty when none were built or fetched, and those schemes are then not offered.
       - path: ../../target/ios/language-dictionaries
+        buildPhase: resources
+        type: folder
+        optional: true
+      # Staged by stage-resources.sh beside EngineResources: the settings app reads 背单词's bundled wordbooks from the wordbooks/ sibling of the EngineResources it finds in the keyboard extension. Empty when none were built.
+      - path: ../../target/ios/wordbooks
         buildPhase: resources
         type: folder
         optional: true
@@ -325,9 +347,11 @@ targets:
       # CandidateOptionsSettingsView 的保存失败提示。
       - path: App/Sources/settings/SettingsSaveFailure.swift
       - path: App/Sources/settings/CandidatePreviewCard.swift
+      - path: App/Sources/settings/CandidateSkinPreview.swift
       # 辅助码页导入码表的选择规则和导入、删除流程（#7176），HelpcodeChoicePolicyTests 与 HelpcodeSettingsTests 直接测它们。
       - path: App/Sources/settings/HelpcodeChoicePolicy.swift
       - path: App/Sources/settings/HelpcodeSettingsView.swift
+      - path: App/Sources/app/IOSRustAccount.swift
       - path: App/Sources/app/ViewRequestGeneration.swift
       - path: App/Sources/app/ViewRequestTask.swift
       - path: App/Sources/app/DesignKit.swift

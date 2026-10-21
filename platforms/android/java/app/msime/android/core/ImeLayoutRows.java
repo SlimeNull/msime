@@ -511,9 +511,8 @@ final class ImeLayoutRows {
             key = s.nineKeyGridKey(digitText, NineKeyShuangpinKeypad.description(face),
                 () -> s.character(digit));
             String hint = NineKeyShuangpinKeypad.compactHint(face);
-            twoLineFace(key, digitText + (hint.isEmpty() ? "" : "\n" + hint));
             KeyboardTypographyPolicy.setKeyTextSize(key, 22);
-            key.setLineSpacing(0f, 0.9f);
+            key.setHintText(hint);
         } else {
             key = s.nineKeyGridKey(digitText, "数字 " + digit,
                 digit == '0' ? () -> commitNineKeyLiteral("0") : () -> {});
@@ -867,6 +866,18 @@ final class ImeLayoutRows {
         if (!digit.isEmpty()) choices.add(digit);
         for (int index = 0; index < letters.length(); index++)
             choices.add(String.valueOf(letters.charAt(index)));
+        showTextOptions(anchor, choices);
+    }
+
+    /** 中文字母键的长按/上滑选项：保留小写、提供大写，并把右上角符号放在同一组里。 */
+    void showLetterOptions(Button anchor, String input) {
+        String lower = input.toLowerCase(java.util.Locale.ROOT);
+        String upper = input.toUpperCase(java.util.Locale.ROOT);
+        String hint = LetterHintTable.hint(input);
+        java.util.List<String> choices = new java.util.ArrayList<>();
+        choices.add(lower);
+        if (!upper.equals(lower)) choices.add(upper);
+        if (hint != null) choices.add(hint);
         showTextOptions(anchor, choices);
     }
 
