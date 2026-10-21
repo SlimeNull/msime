@@ -1390,7 +1390,10 @@ static void TestUserPaddingSelectedBar()
         @"candidates": @[@{@"text": @"合成", @"highlighted": @YES}]} forKey:@"view"];
     for (NSNumber *percent in @[@50, @100, @150, @200]) for (NSNumber *vertical in @[@NO, @YES]) {
         [appearance applySharedCandidatePreferences:@{
+            @"global_theme": @"custom",
+            @"custom_theme": @{@"base": @"system", @"candidate_skin": @"bar"},
             @"candidate_scale_percent": percent, @"candidate_item_padding_horizontal": @8}];
+        assert([appearance candidateWindowSkinForDark:NO].tokens.showSelectedBar);
         appearance.vertical = vertical.boolValue;
         [controller renderCandidates];
         MSIMECandidateButton *button = CandidateButton(panel.contentView, 0);

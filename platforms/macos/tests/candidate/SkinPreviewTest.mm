@@ -353,6 +353,9 @@ static void TestCandidateWindowStyle(MSIMEAppearancePreferences *preferences, NS
         NSDictionary *originalAppearance = [preferences cloudSettingsSnapshot];
         const BOOL previousPreedit = preferences.showsCandidatePreedit;
         NSString *previousSelected = preferences.candidateSelectedColor;
+        // 贴边宽度只测矩形高亮，避免圆角遮罩与颜色阈值改变可见像素边界。
+        [preferences applySharedCandidatePreferences:@{
+            @"candidate_corner_radius": @0, @"candidate_item_corner_radius": @0}];
         preferences.showsCandidatePreedit = NO;
         preferences.pageSize = 1;
         preferences.candidateSelectedColor = @"#FF00FF";
@@ -367,9 +370,18 @@ static void TestCandidateWindowStyle(MSIMEAppearancePreferences *preferences, NS
                     assert(NSWidth(selected) > 10 && NSHeight(selected) > 2);
                     if (vertical.boolValue) {
                         const CGFloat pixelsPerPoint = bitmap.pixelsWide / NSWidth(preview.bounds);
-                        const CGFloat inset = msime::mac::CandidateInset([preferences candidateWindowSkinForDark:preview.previewUsesDark].tokens);
+                        const auto tokens = [preferences candidateWindowSkinForDark:preview.previewUsesDark].tokens;
+                        assert(tokens.radius == 0 && tokens.selectedRadius == 0);
+                        const CGFloat inset = MAX(msime::mac::CandidateInset(tokens), MAX(0.0, tokens.borderWidth) / 2.0);
                         const CGFloat expectedWidth = NSWidth(preview.bounds) - 28.0 - 2.0 * inset;
-                        assert(NSWidth(selected) / pixelsPerPoint >= expectedWidth - 1.0);
+                        const CGFloat actualWidth = NSWidth(selected) / pixelsPerPoint;
+                        // 两侧半像素的覆盖率会让颜色阈值少计一个物理像素，不按逻辑点放宽。
+                        const BOOL matches = std::abs(actualWidth - expectedWidth) <= 1.0 / pixelsPerPoint + .001;
+                        if (!matches) {
+                            NSLog(@"Synthetic selection width mismatch: scale=%@ padding=%@ pixelsPerPoint=%.3f actual=%.3f expected=%.3f",
+                                  percent, paddingValue, pixelsPerPoint, actualWidth, expectedWidth);
+                        }
+                        assert(matches);
                     }
                 }
             }
