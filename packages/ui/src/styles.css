@@ -1058,7 +1058,7 @@
       flex-basis: 100%;
     }
     .container:has(> .skin-background-image) {
-      overflow: hidden;
+      overflow: hidden !important;
     }
   }
   :is([data-platform="win"]) &[data-preview-theme="light"] {
