@@ -30,4 +30,4 @@ macOS 普通候选窗只按当前页候选和首行内容计算宽度，不再�
 - `cmake --build target/macos-isolated --target shortcut-test candidate-placement-test --parallel 6`：通过。
 - `ctest --test-dir target/macos-isolated -R '^(shortcut|shortcut-translations|candidate-placement)$' --output-on-failure`：三项通过。
 - `pnpm run verify-notes`、`git diff --check`：通过。
-- `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer MSIME_SPARKLE_ROOT=/Users/slimenull/Developer/Dependencies/Sparkle-2.9.6 bash scripts/verify-local.sh --quick`：通过，含完整 macOS 原生宿主构建。默认选中的 Command Line Tools 缺少 SwiftUI 宏插件和 XCTest，首次门禁因此失败；仅为本次命令指定完整 Xcode，不修改机器的全局工具链选择。
+- `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer MSIME_SPARKLE_ROOT="$HOME/Developer/Dependencies/Sparkle-2.9.6" bash scripts/verify-local.sh --quick`：通过，含完整 macOS 原生宿主构建。默认选中的 Command Line Tools 缺少 SwiftUI 宏插件和 XCTest，首次门禁因此失败；仅为本次命令指定完整 Xcode，不修改机器的全局工具链选择。
