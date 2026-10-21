@@ -108,6 +108,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     showInstallInputSource,
     showFloatingToolbar,
     showToolbarAppearance,
+    showToolbarIdleBehavior,
     showToolbarComponents,
     showTouchKeyboardHeight,
     showTouchKeyboardSpacing,
@@ -332,6 +333,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     issuesUrl: platformIssuesUrl,
     copyText: client.copyText,
     openExternalUrl: client.openExternalUrl,
+    setError,
   });
   const {
     dataDirectory,
@@ -689,6 +691,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     showInstallInputSource,
     showFloatingToolbar,
     showToolbarAppearance,
+    showToolbarIdleBehavior,
     showToolbarComponents,
     showTouchKeyboardHeight,
     showTouchKeyboardSpacing,
