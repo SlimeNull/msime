@@ -5807,15 +5807,19 @@ static bool gCapsHeld = false;
 static bool gCapsReleaseWorks = true;
 static NSUInteger gCapsReleases = 0;
 static std::int64_t SyntheticCapsNow() { return gCapsNow; }
-static bool SyntheticCapsHeld() { return gCapsHeld; }
+static CGEventFlags SyntheticCapsFlags(CGEventSourceStateID state) {
+    assert(state == kCGEventSourceStateHIDSystemState);
+    // 松手后逻辑锁定位仍为真，只有实体按住位清除；不能把锁定当成长按。
+    return NX_ALPHASHIFTMASK | (gCapsHeld ? NX_ALPHASHIFT_STATELESS_MASK : 0);
+}
 static bool SyntheticCapsRelease() { ++gCapsReleases; return gCapsReleaseWorks; }
 
 static void TestCapsLockTap() {
     const auto realRelease = MSIMECapsLockRelease;
-    const auto realHeld = MSIMECapsLockKeyHeld;
+    const auto realFlags = MSIMECapsLockFlagsState;
     const auto realNow = MSIMECapsLockNow;
     MSIMECapsLockRelease = &SyntheticCapsRelease;
-    MSIMECapsLockKeyHeld = &SyntheticCapsHeld;
+    MSIMECapsLockFlagsState = &SyntheticCapsFlags;
     MSIMECapsLockNow = &SyntheticCapsNow;
     gCapsReleases = 0;
     gCapsReleaseWorks = true;
@@ -5971,8 +5975,30 @@ static void TestCapsLockTap() {
         gCapsHeld = false;
     }
 
+    // 实体松手的 FlagsChanged 可能先于下一次轮询抵达；锁定位仍开时不能取消这次轻点，也不能重新计时。
+    for (unsigned short code : {static_cast<unsigned short>(0x39), static_cast<unsigned short>(0xff)}) {
+        assert(![controller handleEvent:capsOff(12.0) client:client]);
+        prefs.englishMode = NO;
+        const NSUInteger releasesBefore = gCapsReleases;
+        gCapsNow = 12000; gCapsHeld = true;
+        assert(![controller handleEvent:capsOn(12.0) client:client]);
+        gCapsNow = 12050; gCapsHeld = false;
+        assert(![controller handleEvent:TapEvent(NSEventTypeFlagsChanged, code, NSEventModifierFlagCapsLock, 12.05) client:client]);
+        assert(gCapsReleases == releasesBefore + 1 && prefs.englishMode && !session.capsLock);
+    }
+
+    // 初始事件和 HID 状态都没有实体按住位时不布防，避免不支持该位的设备连长按也被切换。
+    assert(![controller handleEvent:capsOff(13.0) client:client]);
+    prefs.englishMode = NO;
+    const NSUInteger releasesBefore = gCapsReleases;
+    gCapsNow = 13000; gCapsHeld = false;
+    assert(![controller handleEvent:capsOn(13.0) client:client]);
+    gCapsNow = 13050;
+    [controller pollCapsLockTap];
+    assert(session.capsLock && !prefs.englishMode && gCapsReleases == releasesBefore);
+
     MSIMECapsLockRelease = realRelease;
-    MSIMECapsLockKeyHeld = realHeld;
+    MSIMECapsLockFlagsState = realFlags;
     MSIMECapsLockNow = realNow;
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
@@ -11967,17 +11993,17 @@ int main(int argc, char **argv) {
                 assert(std::abs(compact.height - (unscaled.height - 2 * (skinPad - 2.0))) < 0.5);
                 assert(compact.width <= unscaled.width);
                 assert(std::abs(candidateRow(NO).frame.origin.x - (rowBefore.origin.x - (skinPad - 2.0))) < 0.5);
-                // #7974：低于 2pt 时候选行继续靠近边缘，最近到 1pt 细边框的宽度；0pt 也留这么多，高亮不会压住边框。
+                // 低于 2pt 时候选行继续靠近边缘；边框不再让 0pt 与 1pt 的布局相同。
                 const CGFloat border = [appearance candidateWindowSkinForDark:[match isEqual:NSAppearanceNameDarkAqua]].tokens.borderWidth;
                 assert(border > 0.0 && border < 2.0);
                 appearance.candidatePadding = @1;
                 [controller appearanceChanged:nil];
                 const NSSize hairline = layoutPanel.frame.size;
-                assert(std::abs(hairline.height - (unscaled.height - 2 * (skinPad - MAX(1.0, border)))) < 0.5);
+                assert(std::abs(hairline.height - (unscaled.height - 2 * (skinPad - 1.0))) < 0.5);
                 appearance.candidatePadding = @0;
                 [controller appearanceChanged:nil];
-                assert(std::abs(layoutPanel.frame.size.height - (unscaled.height - 2 * (skinPad - border))) < 0.5);
-                assert(std::abs(candidateRow(NO).frame.origin.x - (rowBefore.origin.x - (skinPad - border))) < 0.5);
+                assert(std::abs(layoutPanel.frame.size.height - (unscaled.height - 2 * skinPad)) < 0.5);
+                assert(std::abs(candidateRow(NO).frame.origin.x - (rowBefore.origin.x - skinPad)) < 0.5);
                 appearance.candidatePadding = nil;
                 [controller appearanceChanged:nil];
                 assert(NSEqualSizes(layoutPanel.frame.size, unscaled));

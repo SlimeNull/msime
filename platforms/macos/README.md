@@ -225,6 +225,8 @@ AI 候选与候选释义相互独立：与来源的 `ai_eligible` / `UpdateAiInp
 
 语音设置的原生备用窗口提供 CoreAudio 录音设备选择：只列出有输入流且有稳定 UID 的设备，将当前系统默认置顶，按名称/UID 稳定排序；保存 UID 而非易变的序号或显示名，设备暂时不可用时保留选择并让下一次录音明确失败，不静默切换麦克风。空选择使用系统默认设备。共享 `capture_device` 与该 UID 双向同步；`voice-capture-device` CTest 覆盖输入设备过滤、默认排序、UID 缺失和失败路径。Tauri 设置页通过 `list_voice_capture_devices` 提供刷新列表。
 
+原生回退语音页的润色方案 id、名称和顺序读取共享 Rust 静态导出的 `shared/voice/PolishPromptCatalog.h`，再追加原有三个自定义槽位；更新命令见[共享润色提示词](../../packages/ui/UPSTREAM.md#共享润色提示词)。`voice-polish-presets` CTest 覆盖实际选择表、所有有效下标、越界下标及空值/未知 id 回退，`scripts/test-polish-prompt-catalog.py` 在 Apple 宿主上编译真实 `VoiceSettings.h`，与共享 JSON 对照。测试只读取静态目录并使用合成边界值，不创建窗口或访问偏好、凭据。
+
 原生备用窗口修改的有效语音字段会回写共享 `voice_input` 偏好，避免与 Tauri 页面形成第二套配置；ASR 与润色 Token 都按 provider 槽位保存，切换 provider 会先保存旧槽位再加载新槽位，缺失槽位继续兼容旧扁平字段。豆包鉴权模式与 Tauri 同步支持新版 API Key 和旧版 App ID + Access Token，缺失或为空的模式即 API Key。文本润色开关同时维护 `polish_text` 与兼容的 `polish_enabled`，保证所有原生请求路径一致。损坏的 provider 值回退到安全首项，缺失或非法的本机默认值不会覆盖共享字段。凭据不纳入云端外观同步，CoreAudio 设备仍以稳定 UID 保存。共享快照写进 NSUserDefaults 之前，润色服务的原生回退值统一是 DeepSeek（`https://api.deepseek.com/chat/completions`、`deepseek-v4-flash`，定义在 `SharedVoicePreferences.h`），与共享层在 macOS 上的首次运行默认一致，原生语音设置窗口、备用 provider 窗口与录音请求不会各报一个 provider。
 
 录音提示音是产品自己的 `start.mp3` / `end.mp3`，CMake 直接从 `platforms/windows/installer/assets/audios/` 放进 bundle 的 `Resources/audios/`，仓库里不另存一份。`VoiceCuePlayer.mm` 启动时一次性解码为 `NSSound`，每次播放先 `stop` 再 `play`，与来源 `cue_player.cpp` 一样从头重播。某一个文件缺失或解码失败时该侧回落到系统的 Glass / Pop 并写一行日志，而来源此时不出声：这里宁可保留一个能听见的开始 / 结束反馈。`voice-cue-player` 与 `bundle-contents` 覆盖这两点。
@@ -270,6 +272,19 @@ AI 候选与候选释义相互独立：与来源的 `ai_eligible` / `UpdateAiInp
 共享偏好 `expand_candidates`（设置页「候选窗口 › 布局」或原生设置窗口候选窗口卡片里的「展开候选」，默认关闭，#7307）打开后，横排、多页的候选窗在 `‹` `›` 后面多一个展开按钮（跟着页码和翻页按钮按 `show_candidate_page_number` 显示），组字时按 Tab、↓ 或点它把这一代的全部候选排成多行网格：一行是当前每页候选数，一次最多画 5 行，上下滚动。Tab 只在未按 Shift 且网格确实可展开时进入网格，网格里的 Tab 再滚过可见的几行；Shift+Tab 仍向前翻页。网格里 ←/→ 在行内移动，↑/↓ 在行之间移动，翻页键一次滚过可见的几行，空格和回车选高亮，数字键选高亮那一行里的第几个，Esc 或第一行再按 ↑ 收起而组字保留，鼠标点选、首行收起按钮和滚轮也可用；网格不认的键先收起网格再照常处理。网格打开时经 `msime_client_all_candidates` 复制一次候选，选择用 `msime_client_select_any_candidate` 带着那一代；组字不变而候选换了一代（云候选、AI 回答到达）时按新的一代重载，组字变了就收起。偏好关闭、竖排或只有一页时方向键规则与上文一致，不受影响。决定与取舍见 `.agents/notes/implemented/feature/2026-10-12-macos-expanded-candidate-grid.md`。
 
 候选定位与焦点约束对照同一 Apple 提交的 `CandidatePanel.mm`：无效光标隐藏窗口、以光标垂直中点选屏、与光标相隔 4 点、底部不足时向上放置，超大窗口至少锚定可见屏幕原点。候选窗口不能成为 key/main window，按钮不接受键盘焦点但支持首次鼠标点击。宽度随候选文字变化，以屏幕可见区域的一半封顶，且至少是候选字号的 7 倍（与来源皮肤的 `.container { min-width: 7em }` 和 Windows `CandidateCardSize.h` 同一规则），皮肤包的 `min_width_dip` 与装饰宽度只能抬高这个下限，7em 下限本身不超过上述屏宽封顶；竖排行铺满卡片，横排列保持自然宽度靠左排列、余量留在右侧；超出列宽的文字在列内折行而不截断，tooltip 仍给出完整文本；候选行使用主题解析出的行圆角（原生为 6 点，高亮连段的首尾行取卡片圆角），并区分普通行和选中行的 hover 颜色。
+
+## 候选窗口与候选项留白
+
+共享设置页「候选窗口 › 窗口样式」提供窗口水平、垂直内边距，以及候选项水平、垂直内边距、独立圆角和间距。窗口内边距是卡片到候选项边缘的距离，候选项内边距包住序号、候选文字及附加行；横排间距作用于列之间，竖排与展开网格作用于行之间。选中、悬停与动画高亮的底色铺满候选项，不额外内缩 1pt；贴边时由窗口内轮廓裁剪保护边框。选中与悬停使用同一个候选项圆角，不改变窗口圆角。
+
+| 共享偏好 | 范围（整体缩放前） |
+| --- | --- |
+| `candidate_padding_horizontal`、`candidate_padding_vertical` | 0–16pt |
+| `candidate_item_padding_horizontal`、`candidate_item_padding_vertical` | 每侧 0–16pt |
+| `candidate_item_corner_radius` | 0–32pt |
+| `candidate_item_spacing` | 0–16pt |
+
+缺省时全部跟随皮肤与现有宿主布局，零是有效覆盖。旧 `candidate_padding` 作为窗口每一轴的兼容回退；首次编辑分轴设置时拆开旧值，恢复某一轴不会改变另一轴。窗口内边距可以为零，不再受边框宽度限制，`0` 与 `1` 分别生效；显式候选项圆角以卡片内轮廓裁剪避免贴边溢出，不强制改写其半径。整体大小缩放这些长度，但不放大边框。新能力只在 macOS 声明，其他宿主不显示无效控件；AppKit 回退设置不增加新控件，但保存时保留这些共享字段。
 
 ## 构建与本地测试
 
