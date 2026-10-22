@@ -259,5 +259,5 @@ test("macOS 系统主题预览补出原生材质的灰色边框，不覆盖自�
 test("macOS 背景图容器在未覆盖候选项圆角时仍裁剪图片", () => {
   const selector = `${mac}[data-preview-theme] :is(.wnd-h,.wnd-v)`.replace(/\s+/g, "");
   const block = card.slice(card.indexOf(`${selector}{.container{`));
-  expect(block).toContain(".container:has(>.skin-background-image){overflow:hidden;}");
+  expect(block).toContain(".container:has(>.skin-background-image){overflow:hidden!important;}");
 });
