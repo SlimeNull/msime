@@ -1337,6 +1337,8 @@ static NSImage *MSIMECandidateLogoImage() {
     NSImage *_decorationFramesSource;
     MSIMEDecorationFrames *_decorationFrames;
     BOOL _rerenderingForCandidateSkin;
+    BOOL _refreshingCandidateSkin;
+    BOOL _candidateSkinRefreshPending;
     CGFloat _tallestVerticalCandidateHeight;
     // 横排候选窗这次显示以来最宽的卡片宽度（不含 canvas 外留白），见 MSIMEWidestCandidateWidth。
     CGFloat _widestHorizontalCandidateWidth;
@@ -8729,6 +8731,23 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 }
 
 - (void)refreshCandidateSkin {
+    if (_refreshingCandidateSkin) {
+        _candidateSkinRefreshPending = YES;
+        return;
+    }
+    _refreshingCandidateSkin = YES;
+    @try {
+        do {
+            _candidateSkinRefreshPending = NO;
+            [self refreshCandidateSkinOnce];
+        } while (_candidateSkinRefreshPending);
+    } @finally {
+        _refreshingCandidateSkin = NO;
+    }
+}
+
+- (void)refreshCandidateSkinOnce {
+    // 玻璃布局会同步重入外观回调；本轮结束后重读内容区外观，避免旧颜色盖回新颜色。
     if (![_panel.contentView isKindOfClass:MSIMECandidateChromeView.class]) return;
     MSIMECandidateChromeView *content = (id)_panel.contentView;
     // 玻璃会按背后的应用单独调整内容外观，文字必须跟随内容区域，而不是仍跟随系统的外层卡片。
