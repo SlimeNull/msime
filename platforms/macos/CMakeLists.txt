@@ -1008,6 +1008,8 @@ set_tests_properties(shortcut PROPERTIES TIMEOUT 240 ENVIRONMENT "CFFIXED_USER_H
 set_tests_properties(shortcut-expanded-scroll PROPERTIES TIMEOUT 60 ENVIRONMENT "CFFIXED_USER_HOME=${MSIME_SHORTCUT_TEST_HOME}")
 add_test(NAME shortcut-translations COMMAND shortcut-test --translations)
 set_tests_properties(shortcut-translations PROPERTIES ENVIRONMENT "CFFIXED_USER_HOME=${MSIME_SHORTCUT_TEST_HOME}")
+add_test(NAME shortcut-translation-font-size COMMAND shortcut-test --translation-font-size)
+set_tests_properties(shortcut-translation-font-size PROPERTIES ENVIRONMENT "CFFIXED_USER_HOME=${MSIME_SHORTCUT_TEST_HOME}")
 add_executable(voice-hold-shortcut-test tests/voice/VoiceHoldShortcutTest.mm)
 target_compile_options(voice-hold-shortcut-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(voice-hold-shortcut-test PRIVATE "-framework AppKit")
