@@ -465,6 +465,8 @@ static NSString *CandidateAnnotationRun(NSDictionary *candidate, BOOL traditiona
 // One page of candidate rows laid out at the card width they get: what the panel draws, what its buttons answer clicks in, and what the keymap panel keeps clear of.
 struct MSIMECandidatePageGeometry {
     std::vector<msime::candidate::CandidateRowLayout> rows;
+    std::vector<double> naturalColumns;
+    CGFloat columnGap = 0;
     NSArray<NSString *> *texts = @[];
     NSArray<NSString *> *annotations = @[];
     NSArray<NSString *> *displays = @[];
@@ -7602,8 +7604,19 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
                                      showSelectedBar:(BOOL)showSelectedBar inset:(CGFloat)inset paging:(BOOL)paging
                                              visible:(NSRect)visible preeditWidth:(CGFloat)preeditWidth
                                         minimumWidth:(CGFloat)minimumWidth reservesGloss:(BOOL)reservesGloss pagerWidth:(CGFloat)pagerWidth {
+    return [self candidatePageGeometry:candidates font:font glossFont:glossFont showSelectedBar:showSelectedBar inset:inset
+        paging:paging visible:visible preeditWidth:preeditWidth minimumWidth:minimumWidth reservesGloss:reservesGloss
+        pagerWidth:pagerWidth expandedColumns:0 sharedColumns:nullptr];
+}
+
+- (MSIMECandidatePageGeometry)candidatePageGeometry:(NSArray *)candidates font:(NSFont *)font glossFont:(NSFont *)glossFont
+                                     showSelectedBar:(BOOL)showSelectedBar inset:(CGFloat)inset paging:(BOOL)paging
+                                             visible:(NSRect)visible preeditWidth:(CGFloat)preeditWidth
+                                        minimumWidth:(CGFloat)minimumWidth reservesGloss:(BOOL)reservesGloss pagerWidth:(CGFloat)pagerWidth
+                                     expandedColumns:(NSUInteger)columnCount
+                                       sharedColumns:(const std::vector<double> *)sharedColumns {
     MSIMECandidatePageGeometry geometry;
-    const BOOL vertical = _appearance.vertical;
+    const BOOL vertical = _appearance.vertical && columnCount == 0;
     const BOOL traditional = _appearance.traditionalOutput && MSIMEScriptConversionApplies(_view);
     // The fonts arrive at the window's scale already; the row's own paddings follow them.
     const CGFloat scale = MSIMECandidateScale(_appearance);
@@ -7675,6 +7688,10 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     geometry.readings = readings;
     geometry.scriptAnnotations = scriptAnnotations;
     geometry.tooltips = tooltips;
+    if (columnCount && !geometry.hidesNumber) {
+        NSString *number = [NSString stringWithFormat:@"%lu", (unsigned long)columnCount];
+        numberWidth = MAX(numberWidth, [number sizeWithAttributes:@{NSFontAttributeName:numberFont}].width);
+    }
     const CGFloat textLeft = userStyle.itemPaddingHorizontal ? *userStyle.itemPaddingHorizontal * scale
         : layout && layout->numberInset ? MAX(5.0 * scale, MSIMESkinLengthValue(layout->numberInset, font.pointSize, scale))
                                        : MSIMECandidateTextLeft(showSelectedBar, scale);
@@ -7698,12 +7715,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     if (userStyle.itemPaddingVertical) metrics.paddingVertical = *userStyle.itemPaddingVertical * scale;
     if (userStyle.itemSpacing) metrics.itemGap = metrics.columnGap = *userStyle.itemSpacing * scale;
+    geometry.columnGap = metrics.columnGap > 0 ? metrics.columnGap : metrics.itemGap;
     std::vector<msime::candidate::CandidateItemWidths> items;
     items.reserve(candidates.count);
     CGFloat natural = 0;
     for (NSUInteger i = 0; i < texts.count; ++i) {
         items.push_back(MSIMECandidateItemWidths(texts[i], annotations[i], translations[i], font, glossFont, scale));
         const CGFloat itemWidth = ceil(msime::candidate::CandidateItemNaturalWidth(items.back(), metrics, !vertical));
+        geometry.naturalColumns.push_back(itemWidth);
         natural = vertical ? MAX(natural, itemWidth) : natural + itemWidth;
     }
     if (!vertical && items.size() > 1) natural += metrics.columnGap * static_cast<CGFloat>(items.size() - 1);
@@ -7729,7 +7748,27 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     };
     // Horizontal rows keep the height a gloss will need even before it arrives, so the card does not grow under the user seconds after the composition started.
     const CGFloat minimumHeight = vertical || !reservesGloss ? 0 : candidateRow + 2 * metrics.paddingVertical + [self reservedGlossHeightForFont:glossFont];
-    geometry.rows = msime::candidate::LayoutCandidatePage(items, geometry.lineWidth, metrics, !vertical, measure, minimumHeight);
+    if (sharedColumns) {
+        NSParameterAssert(!vertical && items.size() <= sharedColumns->size());
+        double x = 0, tallest = minimumHeight;
+        geometry.lineWidth = 0;
+        for (double column : *sharedColumns) geometry.lineWidth += column;
+        geometry.lineWidth += geometry.columnGap * (sharedColumns->size() - 1);
+        geometry.width = geometry.lineWidth + 2 * inset + pagerWidth;
+        for (NSUInteger index = 0; index < items.size(); ++index) {
+            msime::candidate::CandidateRowLayout row;
+            row.x = x;
+            row.width = (*sharedColumns)[index];
+            row.item = msime::candidate::LayoutCandidateItem(items[index], row.width - metrics.chrome, metrics, true,
+                [&, index](msime::candidate::CandidateRun run, double runWidth) { return measure(index, run, runWidth); });
+            tallest = MAX(tallest, row.item.height);
+            geometry.rows.push_back(row);
+            x += row.width + geometry.columnGap;
+        }
+        for (auto &row : geometry.rows) row.height = tallest;
+    } else {
+        geometry.rows = msime::candidate::LayoutCandidatePage(items, geometry.lineWidth, metrics, !vertical, measure, minimumHeight);
+    }
     for (auto &row : geometry.rows) {
         // Whole points keep neighbouring buttons touching and their text on the pixel grid.
         const double left = round(row.x), right = round(row.x + row.width);
@@ -8202,7 +8241,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     if (skin.canvas) [content configureCanvas:canvas assets:assets];
 }
 
-// 画展开的候选网格，见「展开的候选网格」一节。皮肤、字体、首行和装饰与普通候选窗一致，每一行按普通候选窗排一页的方式排（candidatePageGeometry:），行与行上下叠起来。光标位置无效、找不到屏幕时返回 NO，由调用方收起网格。
+// 展开网格共用各列宽度，行内按单元格实宽折行；皮肤、字体和选词契约沿用普通候选窗。
 - (BOOL)renderExpandedCandidates {
     const bool timed = msime_macos_diagnostic_enabled();
     const uint64_t buildStarted = timed ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
@@ -8296,23 +8335,43 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const auto shadowInsets = msime::mac::CandidateShadowExtraInsets([self candidateShadowForSkin:skin dark:skinDark],
         skin.canvas ? skin.canvas->outer : msime::mac::SkinInsets{}, decorationImage ? skin.decorationTopDip : 0);
     rowVisible.size.width = MAX(0.0, rowVisible.size.width - canvasExtra - 2 * (shadowInsets.left + shadowInsets.right));
-    auto geometryForRow = [&](NSUInteger row) {
+    auto geometryForRow = [&](NSUInteger row, const std::vector<double> *sharedColumns = nullptr) {
         const NSUInteger start = row * columns;
         NSArray<NSDictionary *> *slice = [_expandedCandidates subarrayWithRange:NSMakeRange(start, MIN(columns, count - start))];
         return [self candidatePageGeometry:slice font:font glossFont:glossFont showSelectedBar:tokens.showSelectedBar
                                       inset:inset paging:NO visible:rowVisible preeditWidth:0
                                minimumWidth:MAX(0.0, MAX(skin.minWidthDip, skin.decorationWidthDip) - canvasExtra)
-                               reservesGloss:NO pagerWidth:toggle.column()];
+                               reservesGloss:NO pagerWidth:toggle.column() expandedColumns:columns sharedColumns:sharedColumns];
     };
     auto layouts = std::make_shared<std::vector<MSIMECandidatePageGeometry>>();
     layouts->reserve(rows);
     std::vector<CGFloat> rowOffsets{0};
     rowOffsets.reserve(rows + 1);
     CGFloat width = headerWidth;
+    std::vector<double> sharedColumns(columns, 0);
     for (NSUInteger row = 0; row < rows; ++row) {
         layouts->push_back(geometryForRow(row));
         width = MAX(width, layouts->back().width);
-        rowOffsets.push_back(rowOffsets.back() + layouts->back().rowsHeight + (row + 1 < rows ? rowGap : 0));
+        for (NSUInteger slot = 0; slot < layouts->back().naturalColumns.size(); ++slot)
+            sharedColumns[slot] = MAX(sharedColumns[slot], layouts->back().naturalColumns[slot]);
+    }
+    const CGFloat columnGap = layouts->front().columnGap;
+    const CGFloat available = MAX((CGFloat)columns, floor(rowVisible.size.width - 2 * MSIMECandidateScreenMargin -
+        2 * inset - toggle.column() - columnGap * (columns - 1)));
+    // 保留短列自然宽度，只收窄超长列；整张网格共用同一组列边界，末页不拉伸。
+    auto sorted = sharedColumns;
+    std::sort(sorted.begin(), sorted.end());
+    CGFloat remaining = available, cap = available;
+    for (NSUInteger slot = 0; slot < sorted.size(); ++slot) {
+        cap = remaining / (sorted.size() - slot);
+        if (sorted[slot] >= cap) break;
+        remaining -= sorted[slot];
+    }
+    for (double &column : sharedColumns) column = MIN(column, cap);
+    for (NSUInteger row = 0; row < rows; ++row) {
+        (*layouts)[row] = geometryForRow(row, &sharedColumns);
+        width = MAX(width, (*layouts)[row].width);
+        rowOffsets.push_back(rowOffsets.back() + (*layouts)[row].rowsHeight + (row + 1 < rows ? rowGap : 0));
     }
     width = ceil(width);
     const NSUInteger visibleRows = MIN(windowRows, rows - _expandedFirstRow);

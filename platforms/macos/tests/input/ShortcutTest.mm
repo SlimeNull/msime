@@ -3686,6 +3686,10 @@ static void TestExpandedCandidateGrid() {
     const CGFloat tallHeight = NSMaxY(ExpandedGridFrame(panel, 0)) - NSMaxY(ExpandedGridFrame(panel, 4));
     const CGFloat normalHeight = NSMaxY(ExpandedGridFrame(panel, 4)) - NSMaxY(ExpandedGridFrame(panel, 8));
     assert(tallHeight > normalHeight);
+    assert(ExpandedGridSubview(panel, 0).itemLayout.textWrapped);
+    for (NSUInteger slot = 0; slot < 4; ++slot)
+        assert(NSMaxX(ExpandedGridFrame(panel, slot)) <= NSWidth(ExpandedGridScrollView(panel).bounds) + 0.01);
+    assert(panel.frame.size.width <= NSScreen.mainScreen.visibleFrame.size.width);
     assert(ExpandedGridScrollView(panel).documentView.subviews.count < session.total);
     ExpandedGridScroll(panel, -(tallHeight - 1), NSEventPhaseBegan);
     const CGFloat beforeUnevenCrossing = NSMinY(ExpandedGridFrame(panel, 4));
@@ -3695,6 +3699,45 @@ static void TestExpandedCandidateGrid() {
     ExpandedGridScroll(panel, 2);
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
     assert(fabs(NSMinY(ExpandedGridFrame(panel, 4)) - beforeUnevenCrossing) < 0.01);
+
+    // 每列跨所有行取共享宽度；最长候选可以在尚未进入视口的行，短末行仍沿用列边界。
+    [controller closeExpandedCandidates];
+    session.total = 39;
+    compose();
+    assert(press(125) && expanded());
+    NSMutableArray<NSDictionary *> *aligned = [[controller valueForKey:@"expandedCandidates"] mutableCopy];
+    for (NSUInteger index = 0; index < aligned.count; ++index) {
+        NSMutableDictionary *entry = [aligned[index] mutableCopy];
+        entry[@"text"] = [@"合成" stringByPaddingToLength:(index == 29 ? 20 : 2 + index % 5)
+            withString:@"合成" startingAtIndex:0];
+        aligned[index] = entry;
+    }
+    [controller setValue:aligned forKey:@"expandedCandidates"];
+    [controller renderCandidates];
+    std::vector<NSRect> columns;
+    for (NSUInteger slot = 0; slot < 4; ++slot) {
+        columns.push_back(ExpandedGridFrame(panel, slot));
+        for (NSUInteger row = 1; row < 3; ++row) {
+            const NSRect cell = ExpandedGridFrame(panel, row * 4 + slot);
+            assert(fabs(NSMinX(cell) - NSMinX(columns[slot])) < 0.01);
+            assert(fabs(NSWidth(cell) - NSWidth(columns[slot])) < 0.01);
+            assert(fabs(ExpandedGridSubview(panel, row * 4 + slot).contentLeft -
+                ExpandedGridSubview(panel, slot).contentLeft) < 0.01);
+            assert(NSMaxX(cell) <= NSWidth(ExpandedGridScrollView(panel).bounds) + 0.01);
+        }
+    }
+    assert(NSWidth(columns[1]) > NSWidth(columns[0]));
+    const CGFloat alignedWidth = panel.frame.size.width;
+    ExpandedGridScroll(panel, -10000, NSEventPhaseBegan);
+    ExpandedGridFinishScroll(panel);
+    for (NSUInteger slot = 0; slot < 3; ++slot) {
+        const NSRect cell = ExpandedGridFrame(panel, 36 + slot);
+        assert(ExpandedGridSubview(panel, 36 + slot));
+        assert(fabs(NSMinX(cell) - NSMinX(columns[slot])) < 0.01);
+        assert(fabs(NSWidth(cell) - NSWidth(columns[slot])) < 0.01);
+    }
+    assert(panel.frame.size.width == alignedWidth && !ExpandedGridSubview(panel, 39));
+    assert(fabs(ExpandedGridSubview(panel, 36).contentLeft - ExpandedGridSubview(panel, 32).contentLeft) < 0.01);
 
     // 从触控板切换到普通滚轮仍按行移动，回到顶部时也清掉剩余像素。
     [controller closeExpandedCandidates];
