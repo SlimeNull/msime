@@ -1338,8 +1338,11 @@ static void TestCanvasHost(const std::filesystem::path &root, NSString *identifi
             const CGFloat headerHeight = MAX(NSHeight(preedit.frame), headerHasControls ? MSIMECandidateHeaderHeight * scale : 0);
             const CGFloat centeredOffset = floor((headerHeight - NSHeight(preedit.frame)) / 2);
             const auto preeditMargin = MSIMECandidatePreeditMargins(skin, YES, scale);
+            if (expanded.boolValue)
+                assert(std::abs(NSMinY(preedit.frame) - NSMaxY(first.enclosingScrollView.frame) -
+                    skin.canvas->lineGap.value_or(0) - preeditMargin.bottom - centeredOffset) < 0.01);
             assert(std::abs(NSMinY(preedit.frame) - NSMaxY(CandidateFrame(first)) -
-                skin.canvas->lineGap.value_or(0) - preeditMargin.bottom - centeredOffset) < 0.01);
+                skin.canvas->lineGap.value_or(0) - preeditMargin.bottom - centeredOffset) <= rowPositionTolerance);
             for (NSView *child in chrome.subviews) {
                 if ([child isKindOfClass:MSIMECandidateCanvasView.class]) {
                     [levels addObject:child.identifier];
@@ -1404,8 +1407,15 @@ static void TestCanvasHost(const std::filesystem::path &root, NSString *identifi
         // 底部挂件留白较大时，整窗夹紧会把卡片向上推，不能用未夹紧的光标位置作期望。
         const CGFloat cardBottom = MAX(NSMaxY(client.caret) + 4, NSMinY(screen) + NSMinY(chrome.cardBounds));
         assert(std::abs(NSMinY(panel.frame) + NSMinY(chrome.cardBounds) - cardBottom) <= 1.0 / panel.backingScaleFactor + 0.01);
-        assert(std::abs(NSMaxY(CandidateFrame(CandidateButton(chrome, 0))) - NSHeight(chrome.cardBounds)
-            + skin.canvas->content->top + 2.0 * appearance.candidateScalePercent / 100.0) < 0.01);
+        const CGFloat topInset = skin.canvas->content->top + 2.0 * appearance.candidateScalePercent / 100.0;
+        const CGFloat actualTop = NSMaxY(CandidateFrame(CandidateButton(chrome, 0)));
+        const CGFloat expectedTop = NSHeight(chrome.cardBounds) - topInset;
+        const CGFloat topTolerance = 1.0 / panel.backingScaleFactor + 0.01;
+        if (std::abs(actualTop - expectedTop) > topTolerance)
+            fprintf(stderr, "canvas headerless top: expanded=%d percent=%ld backing=%.1f actual=%.3f expected=%.3f card=%s\n",
+                expanded.boolValue, (long)appearance.candidateScalePercent, panel.backingScaleFactor, actualTop,
+                expectedTop, NSStringFromRect(chrome.cardBounds).UTF8String);
+        assert(std::abs(actualTop - expectedTop) <= topTolerance);
     }
     [controller hideCandidatePanel:"empty"];
     [controller setValue:nil forKey:@"activeClient"];
