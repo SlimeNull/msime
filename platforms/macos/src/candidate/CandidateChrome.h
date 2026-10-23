@@ -703,6 +703,10 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 }
 @end
 
+static inline CGFloat MSIMEExpandedCandidateScrollerPadding(CGFloat scale) {
+    return ceil([NSScroller scrollerWidthForControlSize:NSControlSizeRegular scrollerStyle:NSScrollerStyleOverlay]) + 4 * scale;
+}
+
 @interface MSIMEExpandedCandidateScrollView : NSScrollView
 @property(nonatomic, copy) NSArray<NSView *> *(^makeRow)(NSUInteger row, CGFloat top, CGFloat documentHeight);
 @property(nonatomic, copy) void (^positionChanged)(NSUInteger firstRow, CGFloat offset, BOOL previous, BOOL next);

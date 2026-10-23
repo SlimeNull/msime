@@ -3608,6 +3608,19 @@ static void TestExpandedCandidateGrid() {
     assert(viewport.contentView.clipsToBounds && !viewport.acceptsFirstResponder);
     assert(viewport.verticalScrollElasticity == NSScrollElasticityAllowed);
     assert(viewport.horizontalScrollElasticity == NSScrollElasticityNone);
+    const CGFloat scrollerPadding = MSIMEExpandedCandidateScrollerPadding(prefs.candidateScalePercent / 100.0);
+    assert(scrollerPadding >= [NSScroller scrollerWidthForControlSize:NSControlSizeRegular
+        scrollerStyle:NSScrollerStyleOverlay] + 4 * prefs.candidateScalePercent / 100.0);
+    const auto rightClearance = [&](NSUInteger tag) {
+        MSIMECandidateButton *button = ExpandedGridSubview(panel, tag);
+        NSScrollView *scrollView = ExpandedGridScrollView(panel);
+        assert(button && scrollView);
+        const NSRect cell = [button convertRect:button.bounds toView:scrollView];
+        assert(NSMaxX(cell) <= NSWidth(scrollView.bounds) - scrollerPadding + 0.01);
+        const NSRect scroller = [scrollView.verticalScroller convertRect:scrollView.verticalScroller.bounds toView:scrollView];
+        if (!NSIsEmptyRect(scroller)) assert(NSMaxX(cell) <= NSMinX(scroller) - 4 * prefs.candidateScalePercent / 100.0 + 0.01);
+    };
+    rightClearance(3);
     NSView *controls = MSIMECandidateControlsView(panel.contentView);
     MSIMECandidateButton *top = ExpandedGridSubview(panel, 0);
     const NSRect topRect = [top convertRect:top.bounds toView:controls];
@@ -3621,6 +3634,7 @@ static void TestExpandedCandidateGrid() {
     ExpandedGridScroll(panel, -10000);
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
+    rightClearance(23);
     assert(panel.frame.size.height == viewportHeight);
     ExpandedGridFinishScroll(panel);
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
@@ -3737,6 +3751,7 @@ static void TestExpandedCandidateGrid() {
         assert(fabs(NSWidth(cell) - NSWidth(columns[slot])) < 0.01);
     }
     assert(panel.frame.size.width == alignedWidth && !ExpandedGridSubview(panel, 39));
+    rightClearance(35);
     assert(fabs(ExpandedGridSubview(panel, 36).contentLeft - ExpandedGridSubview(panel, 32).contentLeft) < 0.01);
 
     // 从触控板切换到普通滚轮仍按行移动，回到顶部时也清掉剩余像素。

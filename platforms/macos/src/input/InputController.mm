@@ -8329,6 +8329,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const CGFloat headerHeight = headerContentHeight + preeditMargin.top + preeditMargin.bottom;
     const CGFloat preeditWidth = preedit.length ? ceil([preedit sizeWithAttributes:@{NSFontAttributeName:preeditFont}].width) + 4 * scale + MSIMEPreeditCaretGap + preeditMargin.left + preeditMargin.right : 0;
     const CGFloat headerWidth = 2 * inset + logoWidth + preeditWidth + (preedit.length && pageControls ? indicatorGap : 0) + controlsWidth;
+    const CGFloat scrollerPadding = MSIMEExpandedCandidateScrollerPadding(scale);
 
     NSRect rowVisible = visible;
     const CGFloat canvasExtra = skin.canvas ? msime::mac::CanvasExtraWidth(*skin.canvas, inset) : 0;
@@ -8351,13 +8352,13 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     std::vector<double> sharedColumns(columns, 0);
     for (NSUInteger row = 0; row < rows; ++row) {
         layouts->push_back(geometryForRow(row));
-        width = MAX(width, layouts->back().width);
+        width = MAX(width, layouts->back().width + scrollerPadding);
         for (NSUInteger slot = 0; slot < layouts->back().naturalColumns.size(); ++slot)
             sharedColumns[slot] = MAX(sharedColumns[slot], layouts->back().naturalColumns[slot]);
     }
     const CGFloat columnGap = layouts->front().columnGap;
     const CGFloat available = MAX((CGFloat)columns, floor(rowVisible.size.width - 2 * MSIMECandidateScreenMargin -
-        2 * inset - toggle.column() - columnGap * (columns - 1)));
+        2 * inset - toggle.column() - scrollerPadding - columnGap * (columns - 1)));
     // 保留短列自然宽度，只收窄超长列；整张网格共用同一组列边界，末页不拉伸。
     auto sorted = sharedColumns;
     std::sort(sorted.begin(), sorted.end());
@@ -8370,7 +8371,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     for (double &column : sharedColumns) column = MIN(column, cap);
     for (NSUInteger row = 0; row < rows; ++row) {
         (*layouts)[row] = geometryForRow(row, &sharedColumns);
-        width = MAX(width, (*layouts)[row].width);
+        width = MAX(width, (*layouts)[row].width + scrollerPadding);
         rowOffsets.push_back(rowOffsets.back() + (*layouts)[row].rowsHeight + (row + 1 < rows ? rowGap : 0));
     }
     width = ceil(width);
@@ -8393,7 +8394,8 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     [_panel setContentSize:NSMakeSize(width, height)];
     MSIMECandidateChromeView *content = [self candidateChromeWithFrame:NSMakeRect(0, 0, width, height) skin:skin];
     content.candidateContentView.clipsToBounds = YES;
-    content.candidateRowsRect = NSMakeRect(inset, verticalInset, MAX(0.0, width - 2 * inset - toggle.column()), rowsHeight);
+    content.candidateRowsRect = NSMakeRect(inset, verticalInset,
+        MAX(0.0, width - 2 * inset - toggle.column() - scrollerPadding), rowsHeight);
     content.candidateRowsTouchTop = headerHeight == 0 && bodyRowGap == 0;
     MSIMEExpandedCandidateScrollView *viewport = [[MSIMEExpandedCandidateScrollView alloc]
         initWithFrame:NSMakeRect(0, verticalInset, MAX(0.0, width - toggle.column()), rowsHeight)];
