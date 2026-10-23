@@ -3812,6 +3812,7 @@ static void TestExpandedCandidateGrid() {
     assert(fabs(NSMinY(ExpandedGridFrame(panel, 20)) - lastBottomY) < 0.01);
     lineScroll(YES);
     assert(panel.hasNextPage && panel.frame.size.height == fixedHeight);
+    assert(press(116) && cursor() == 0);
     session.tallIndex = 0;
 
     // 跨行前后同一候选的位置连续；反向滚动沿用同一像素视口。

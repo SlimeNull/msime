@@ -2490,7 +2490,6 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     if (!count || ![_expandedScrollView scrollByRowBackwards:backwards]) return;
     const NSRange visible = _expandedScrollView.visibleRowRange;
     _expandedScrollsViewport = YES;
-    _expandedVisibleRows = visible.length;
     const NSUInteger row = _expandedCursor / columns;
     const NSUInteger column = _expandedCursor % columns;
     const NSUInteger target = std::clamp(row, visible.location, NSMaxRange(visible) - 1);
