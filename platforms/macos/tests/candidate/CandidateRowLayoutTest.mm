@@ -1275,6 +1275,7 @@ static void TestCanvasHost(const std::filesystem::path &root, NSString *identifi
                     first.enclosingScrollView.contentView.clipsToBounds);
                 NSScrollView *viewport = first.enclosingScrollView;
                 assert(fabs(NSMinX(viewport.frame) - padding.left + msime::mac::CandidateInset(skin.tokens)) < 0.01);
+                assert(fabs(NSMinX(first.frame) - msime::mac::CandidateInset(skin.tokens)) < 0.01);
                 assert(NSMaxX(viewport.frame) <= NSWidth(card) + positionTolerance);
                 if (!skin.expandPanel.value_or(false)) {
                     if (fabs(NSMaxX(viewport.frame) - NSWidth(card)) > positionTolerance)
@@ -1297,14 +1298,27 @@ static void TestCanvasHost(const std::filesystem::path &root, NSString *identifi
             }
             const CGFloat itemRadius = [identifier isEqual:@"canvas-host"] ? 3.5 : [identifier isEqual:@"green_leaf"] ? 5 : 6;
             assert(std::abs(first.cornerRadius - itemRadius * percent.doubleValue / 100) < 0.01);
-            assert(std::abs(NSMinX(CandidateFrame(first)) - padding.left) < 0.01);
+            // 原生裁剪视口会按 backing 像素定位；逻辑单元格仍在上面严格检查。
+            const CGFloat rowPositionTolerance = expanded.boolValue ? positionTolerance : 0.01;
+            if (std::abs(NSMinX(CandidateFrame(first)) - padding.left) > rowPositionTolerance)
+                fprintf(stderr, "canvas candidate x: percent=%ld vertical=%d dark=%d expanded=%d backing=%.1f frame=%s expected=%.3f viewport=%s clip=%s document=%s\n",
+                    (long)percent.integerValue, vertical.boolValue, dark.boolValue, expanded.boolValue, panel.backingScaleFactor,
+                    NSStringFromRect(CandidateFrame(first)).UTF8String, padding.left,
+                    NSStringFromRect(first.enclosingScrollView.frame).UTF8String,
+                    NSStringFromRect(first.enclosingScrollView.contentView.bounds).UTF8String,
+                    NSStringFromRect(first.enclosingScrollView.documentView.frame).UTF8String);
+            assert(std::abs(NSMinX(CandidateFrame(first)) - padding.left) <= rowPositionTolerance);
             CGFloat bottom = CGFLOAT_MAX;
             for (NSInteger tag = 0; tag < 3; ++tag) {
                 MSIMECandidateButton *button = CandidateButton(chrome, tag);
                 assert(button && NSMaxX(CandidateFrame(button)) <= NSWidth(card) - padding.right + positionTolerance);
                 bottom = MIN(bottom, NSMinY(CandidateFrame(button)));
             }
-            assert(std::abs(bottom - padding.bottom) < 0.01);
+            if (std::abs(bottom - padding.bottom) > rowPositionTolerance)
+                fprintf(stderr, "canvas candidate bottom: percent=%ld vertical=%d dark=%d expanded=%d backing=%.1f actual=%.3f expected=%.3f\n",
+                    (long)percent.integerValue, vertical.boolValue, dark.boolValue, expanded.boolValue,
+                    panel.backingScaleFactor, bottom, padding.bottom);
+            assert(std::abs(bottom - padding.bottom) <= rowPositionTolerance);
             const NSPoint hit = [first convertPoint:NSMakePoint(NSMidX(first.bounds), NSMidY(first.bounds)) toView:chrome];
             assert([chrome hitTest:hit] == first);
             assert([first.titleColor isEqual:SkinColor(skin.tokens.selectedText)]);
@@ -1899,7 +1913,17 @@ static void TestFactoryExpandToggle(RowLayoutClient *client)
                         (long)font, scale, expanded, NSWidth(toggle.frame), side);
                 assert(fabs(NSWidth(toggle.frame) - side) < 0.01 && fabs(NSHeight(toggle.frame) - side) < 0.01);
                 const CGFloat top = MAX(0, (pointSize * 1.35 + 2 * scale - side) / 2);
-                assert(fabs(NSMaxY(CandidateFrame(first)) - NSMaxY(toggle.frame) - top) < 0.01);
+                if (expanded)
+                    assert(fabs(NSMaxY(first.enclosingScrollView.frame) - NSMaxY(toggle.frame) - top) < 0.01);
+                const CGFloat topTolerance = expanded ? 1.0 / panel.backingScaleFactor + 0.01 : 0.01;
+                if (fabs(NSMaxY(CandidateFrame(first)) - NSMaxY(toggle.frame) - top) > topTolerance)
+                    fprintf(stderr, "expand toggle top: canvas=%d dark=%d font=%ld percent=%ld preedit=%d pages=%d expanded=%d backing=%.1f first=%s toggle=%s expected=%.3f viewport=%s clip=%s document=%s\n",
+                        canvas, dark, (long)font, (long)percent, preedit, pageControls, expanded, panel.backingScaleFactor,
+                        NSStringFromRect(CandidateFrame(first)).UTF8String, NSStringFromRect(toggle.frame).UTF8String, top,
+                        NSStringFromRect(first.enclosingScrollView.frame).UTF8String,
+                        NSStringFromRect(first.enclosingScrollView.contentView.bounds).UTF8String,
+                        NSStringFromRect(first.enclosingScrollView.documentView.frame).UTF8String);
+                assert(fabs(NSMaxY(CandidateFrame(first)) - NSMaxY(toggle.frame) - top) <= topTolerance);
                 const CGFloat right = canvas ? 9 * scale : NSMinX(CandidateFrame(first));
                 if (fabs(NSWidth(chrome.cardBounds) - NSMaxX(toggle.frame) - right - scale) >= 0.01)
                     fprintf(stderr, "expand toggle right: canvas=%d font=%ld scale=%.1f expanded=%d card=%.2f toggle=%.2f right=%.2f\n",

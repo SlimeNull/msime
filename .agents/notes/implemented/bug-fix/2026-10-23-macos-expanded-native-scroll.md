@@ -34,6 +34,10 @@ Canvas 内容边距适配同时调整展开视口及文档宽度。视口已经�
 
 Canvas 夹具组合右边距 `0/2/21`、左边距 `0/23`、独立收起按钮开关、`100%/150%` 缩放、横竖布局和明暗主题；强制显示原生滚动条，核对其完整边界、候选间隔、文档与裁剪视口等宽及无横向滚动。卡片受 `NSWindow` 物理像素取整影响，边界断言只允许一个物理像素误差。`candidate-factory-layout` 单独覆盖展开共享列的首列左下外圆角和末列左下内圆角，普通候选的末行圆角与动画路径断言仍保留。
 
+原生视口的坐标转换和逻辑布局分开验证：文档内首候选的 X、Canvas 视口的 X、候选视口顶部与收起按钮的间距仍要求 `0.01` 点精度；跨过 `NSClipView` 转换后的候选左缘、底缘及卷轴顶部关系只允许一个 backing 像素误差。普通未展开布局仍要求 `0.01` 点，不把原生滚动的容差扩散到原有路径。失败日志记录缩放、主题、布局、候选及 viewport/clip/document 矩形，不靠继续扩大容差排查。
+
+PR 的 macOS arm64 CI 在 `candidate-row-layout` 左缘及 `candidate-factory-expand-toggle` 顶部关系断言失败，但没有输出偏差值；本机 macOS 26.7.1 / Xcode 27 的 Debug、Release 均不能复现原断言。不能据此断言 CI 一定只是像素取整：保留严格逻辑几何检查后，还需要同一 CI 环境的复跑结果；超出一个物理像素的偏差必须按新增日志继续定位。
+
 回弹回归检查竖向 `Allowed`、横向 `None`，以及停在底部后新手势仍进入原生滚动入口、原生裁剪视口确实越过底部、虚拟行定位不越界、外框高度不变。手势结束后只等待 AppKit 将视口弹回合法范围，不用程序定位伪造复位。合成事件覆盖越界和复位，但不证明真实触摸板手感，维护者仍需要分别测试连续滚到底和停稳后再向下滑。
 
 原生宿主构建、`shortcut`、`shortcut-expanded-scroll`、`candidate-row-layout`、`candidate-factory-layout`、`candidate-expanded-grid`、`bundle-contents`、`session-smoke`、`text-client`、`desktop-input-session`、`input-source-registration`、`backend-library-load` 十一项 CTest 和 `pnpm run verify-notes` 是这组改动的本地验证范围。输入会话测试曾出现一次响应计数断言失败，单独复跑通过，不把它记作首次全绿。完整设置应用与输入法安装时另核验签名和核心 UUID；合成事件与安装核验不等于真实触摸板惯性验收。
