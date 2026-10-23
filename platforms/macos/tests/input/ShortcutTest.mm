@@ -3664,6 +3664,55 @@ static void TestExpandedCandidateGrid() {
     ExpandedGridFinishScroll(panel);
     assert(fabs(NSMinY(ExpandedGridFrame(panel, 0)) - firstCandidateY) < 0.01);
 
+    const auto lineScroll = [&](BOOL backwards) {
+        CGEventRef cg = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitLine, 1, backwards ? 1 : -1);
+        NSEvent *event = [NSEvent eventWithCGEvent:cg];
+        CFRelease(cg);
+        [panel scrollWheel:event];
+    };
+    // 到底后的无效普通滚轮不能丢掉手动视口，之后重画也不能拉回旧高亮。
+    ExpandedGridScroll(panel, -10000, NSEventPhaseBegan);
+    ExpandedGridFinishScroll(panel);
+    assert(cursor() == 0 && [[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    const CGFloat bottomY = NSMinY(ExpandedGridFrame(panel, 20));
+    MSIMEExpandedCandidateScrollView *bottomScroll = ExpandedGridScrollView(panel);
+    lineScroll(NO);
+    assert(ExpandedGridScrollView(panel) == bottomScroll);
+    assert([[controller valueForKey:@"expandedScrollsViewport"] boolValue]);
+    [controller renderCandidates];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 20)) - bottomY) < 0.01);
+
+    // 末行特别高时，旧可见行数会误报到底；普通滚轮按真实行高继续，且不改变视口高度。
+    [controller closeExpandedCandidates];
+    compose();
+    assert(press(125) && expanded());
+    NSMutableArray<NSDictionary *> *tallLastRows = [[controller valueForKey:@"expandedCandidates"] mutableCopy];
+    NSMutableDictionary *tallLast = [tallLastRows[20] mutableCopy];
+    tallLast[@"text"] = [@"合成" stringByPaddingToLength:400 withString:@"合成" startingAtIndex:0];
+    tallLastRows[20] = tallLast;
+    [controller setValue:tallLastRows forKey:@"expandedCandidates"];
+    [controller renderCandidates];
+    const CGFloat fixedHeight = panel.frame.size.height;
+    const CGFloat firstHeight = NSMinY(ExpandedGridFrame(panel, 0)) - NSMinY(ExpandedGridFrame(panel, 4));
+    ExpandedGridScroll(panel, -firstHeight, NSEventPhaseBegan);
+    ExpandedGridFinishScroll(panel);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1 && panel.hasNextPage);
+    lineScroll(NO);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 2);
+    assert(cursor() >= 8 && panel.frame.size.height == fixedHeight);
+    const CGFloat secondRowY = NSMinY(ExpandedGridFrame(panel, 8));
+    [controller renderCandidates];
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 8)) - secondRowY) < 0.01);
+    for (NSUInteger step = 0; step < 10 && panel.hasNextPage; ++step) lineScroll(NO);
+    assert(!panel.hasNextPage && panel.frame.size.height == fixedHeight);
+    const CGFloat lastBottomY = NSMinY(ExpandedGridFrame(panel, 20));
+    lineScroll(NO);
+    [controller renderCandidates];
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 20)) - lastBottomY) < 0.01);
+    lineScroll(YES);
+    assert(panel.hasNextPage && panel.frame.size.height == fixedHeight);
+
     // 跨行前后同一候选的位置连续；反向滚动沿用同一像素视口。
     [controller closeExpandedCandidates];
     session.total = 40;

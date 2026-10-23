@@ -2321,19 +2321,13 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
 - (void)scrollExpandedCandidatesBackwards:(BOOL)backwards {
     const NSUInteger count = _expandedCandidates.count;
     const NSUInteger columns = MAX((NSUInteger)1, (NSUInteger)_appearance.pageSize);
-    const NSUInteger rows = msime::candidate::ExpandedGridRows(count, columns);
-    const NSUInteger visibleRows = MIN(rows, MAX((NSUInteger)1, _expandedVisibleRows));
-    if (!count || rows <= visibleRows) return;
-    const BOOL hadOffset = _expandedScrollOffset != 0;
-    _expandedScrollOffset = 0;
-    _expandedScrollsViewport = NO;
-    if (backwards && _expandedFirstRow > 0) --_expandedFirstRow;
-    else if (!backwards && _expandedFirstRow + visibleRows < rows) ++_expandedFirstRow;
-    else if (!hadOffset) return;
+    if (!count || ![_expandedScrollView scrollByRowBackwards:backwards]) return;
+    const NSRange visible = _expandedScrollView.visibleRowRange;
+    _expandedScrollsViewport = YES;
+    _expandedVisibleRows = visible.length;
     const NSUInteger row = _expandedCursor / columns;
     const NSUInteger column = _expandedCursor % columns;
-    const NSUInteger target = row < _expandedFirstRow ? _expandedFirstRow
-                            : row >= _expandedFirstRow + visibleRows ? _expandedFirstRow + visibleRows - 1 : row;
+    const NSUInteger target = std::clamp(row, visible.location, NSMaxRange(visible) - 1);
     _expandedCursor = MIN(target * columns + column, count - 1);
     [self renderCandidates];
 }

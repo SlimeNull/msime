@@ -716,6 +716,8 @@ static inline CGFloat MSIMEExpandedCandidateScrollerPadding(CGFloat scale) {
 @property(nonatomic, copy) BOOL (^canScroll)(void);
 - (void)configureRowOffsets:(const std::vector<CGFloat> &)offsets width:(CGFloat)width;
 - (void)scrollToTopOffset:(CGFloat)offset;
+- (NSRange)visibleRowRange;
+- (BOOL)scrollByRowBackwards:(BOOL)backwards;
 @end
 
 @implementation MSIMEExpandedCandidateScrollView {
@@ -780,18 +782,44 @@ static inline CGFloat MSIMEExpandedCandidateScrollerPadding(CGFloat scale) {
         self.manualScrollBegan();
     [self updateVisibleRows];
 }
+- (NSRange)visibleRowRange {
+    if (_rowOffsets.size() < 2) return NSMakeRange(0, 0);
+    const NSUInteger rows = _rowOffsets.size() - 1;
+    const CGFloat height = NSHeight(self.contentView.bounds);
+    const CGFloat maximum = MAX(0.0, _rowOffsets.back() - height);
+    const CGFloat top = std::clamp(_rowOffsets.back() - NSMaxY(self.documentVisibleRect), 0.0, maximum);
+    const auto upper = std::upper_bound(_rowOffsets.begin(), _rowOffsets.end() - 1, top);
+    const NSUInteger first = upper == _rowOffsets.begin() ? 0 : (NSUInteger)(upper - _rowOffsets.begin() - 1);
+    NSUInteger end = first + 1;
+    while (end < rows && _rowOffsets[end] < top + height) ++end;
+    return NSMakeRange(first, end - first);
+}
+- (BOOL)scrollByRowBackwards:(BOOL)backwards {
+    const NSRange visible = self.visibleRowRange;
+    if (!visible.length) return NO;
+    const CGFloat maximum = MAX(0.0, _rowOffsets.back() - NSHeight(self.contentView.bounds));
+    const CGFloat top = std::clamp(_rowOffsets.back() - NSMaxY(self.documentVisibleRect), 0.0, maximum);
+    CGFloat target;
+    if (backwards) {
+        const NSUInteger row = top > _rowOffsets[visible.location] ? visible.location
+            : visible.location > 0 ? visible.location - 1 : 0;
+        target = _rowOffsets[row];
+    } else {
+        target = MIN(maximum, _rowOffsets[visible.location + 1]);
+    }
+    if (target == top) return NO;
+    [self scrollToTopOffset:target];
+    return YES;
+}
 - (void)updateVisibleRows {
     if (_updatingVisibleRows || _rowOffsets.size() < 2 || !self.makeRow) return;
     _updatingVisibleRows = YES;
     @try {
-        const NSUInteger rows = _rowOffsets.size() - 1;
         const CGFloat height = NSHeight(self.contentView.bounds);
         const CGFloat maximum = MAX(0.0, _rowOffsets.back() - height);
         const CGFloat top = std::clamp(_rowOffsets.back() - NSMaxY(self.documentVisibleRect), 0.0, maximum);
-        const auto upper = std::upper_bound(_rowOffsets.begin(), _rowOffsets.end() - 1, top);
-        const NSUInteger first = upper == _rowOffsets.begin() ? 0 : (NSUInteger)(upper - _rowOffsets.begin() - 1);
-        NSUInteger end = first + 1;
-        while (end < rows && _rowOffsets[end] < top + height) ++end;
+        const NSRange visible = self.visibleRowRange;
+        const NSUInteger first = visible.location, end = NSMaxRange(visible);
         BOOL changed = NO;
         for (NSNumber *key in _visibleRows.allKeys) {
             if (key.unsignedIntegerValue >= first && key.unsignedIntegerValue < end) continue;
