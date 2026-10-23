@@ -792,16 +792,22 @@ static void TestFactoryCornerRadii(RowLayoutClient *client)
             if (!follow) { assert(path == nullptr); continue; }
             assert(path && CGRectEqualToRect(CGPathGetBoundingBox(path), first.bounds));
             assert(fabs(first.cornerRadii[0] - (preedit.boolValue ? first.cornerRadius : outer)) < 0.01);
-            if (fabs(last.cornerRadii[3] - outer) >= 0.01)
+            const double lastBottomLeft = expanded.boolValue ? last.cornerRadius : outer;
+            if (expanded.boolValue) {
+                // 展开共享列处于同一行，只有第一列贴着左下边界。
+                assert(fabs(NSMinY(CandidateFrame(first)) - NSMinY(CandidateFrame(last))) < 0.01);
+                assert(fabs(first.cornerRadii[3] - outer) < 0.01);
+            }
+            if (fabs(last.cornerRadii[3] - lastBottomLeft) >= 0.01)
                 fprintf(stderr, "corner geometry skin=%s scale=%.1f vertical=%d preedit=%d expanded=%d area=%s first=%s last=%s radius=%.2f expected=%.2f\n",
                     identifier, scale, vertical.boolValue, preedit.boolValue, expanded.boolValue, NSStringFromRect(chrome.candidateRowsRect).UTF8String,
-                    NSStringFromRect(CandidateFrame(first)).UTF8String, NSStringFromRect(CandidateFrame(last)).UTF8String, last.cornerRadii[3], outer);
-            assert(fabs(last.cornerRadii[3] - outer) < 0.01);
+                    NSStringFromRect(CandidateFrame(first)).UTF8String, NSStringFromRect(CandidateFrame(last)).UTF8String, last.cornerRadii[3], lastBottomLeft);
+            assert(fabs(last.cornerRadii[3] - lastBottomLeft) < 0.01);
             if (vertical.boolValue) {
                 assert(fabs(first.cornerRadii[1] - (preedit.boolValue ? first.cornerRadius : outer)) < 0.01);
                 assert(fabs(last.cornerRadii[2] - outer) < 0.01);
             } else {
-                // 末行只有一项，右缘没有贴满卡片，不能凭“末候选”借右下角。
+                // 此夹具右缘没有贴满候选区域，不能凭“末候选”借右下角。
                 assert(NSMaxX(CandidateFrame(last)) + scale < NSMaxX(chrome.candidateRowsRect));
                 assert(fabs(last.cornerRadii[2] - last.cornerRadius) < 0.01);
             }
