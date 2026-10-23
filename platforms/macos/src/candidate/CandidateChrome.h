@@ -706,3 +706,12 @@ static inline NSView *MSIMECandidateControlsView(NSView *view) {
     return [view isKindOfClass:MSIMECandidateChromeView.class]
         ? ((MSIMECandidateChromeView *)view).candidateContentView : view;
 }
+
+static inline NSArray<__kindof NSView *> *MSIMECandidateControlSubviews(NSView *view) {
+    NSArray<NSView *> *children = MSIMECandidateControlsView(view).subviews;
+    NSMutableArray<NSView *> *controls = [children mutableCopy];
+    for (NSView *child in children)
+        if ([child.identifier isEqual:@"candidate-expanded-viewport"])
+            [controls addObjectsFromArray:child.subviews];
+    return controls;
+}

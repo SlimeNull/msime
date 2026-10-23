@@ -864,7 +864,7 @@ static void MSIMEReleaseControllerOnMain(__strong id *controller) {
 // word than the one the user sees.
 static NSDictionary *MSIMERenderedCandidateIdentity(NSPanel *panel, NSInteger slot) {
     if (!panel || ![panel.contentView isKindOfClass:NSView.class]) return nil;
-    for (NSView *subview in MSIMECandidateControlsView(panel.contentView).subviews) {
+    for (NSView *subview in MSIMECandidateControlSubviews(panel.contentView)) {
         if (![subview isKindOfClass:MSIMECandidateButton.class] || subview.tag != slot) continue;
         NSDictionary *identity = ((MSIMECandidateButton *)subview).candidateID;
         return [identity isKindOfClass:NSDictionary.class] ? identity : nil;
@@ -874,7 +874,7 @@ static NSDictionary *MSIMERenderedCandidateIdentity(NSPanel *panel, NSInteger sl
 
 static NSDictionary *MSIMERenderedHighlightedCandidateIdentity(NSPanel *panel) {
     if (!panel || ![panel.contentView isKindOfClass:NSView.class]) return nil;
-    for (NSView *subview in MSIMECandidateControlsView(panel.contentView).subviews) {
+    for (NSView *subview in MSIMECandidateControlSubviews(panel.contentView)) {
         if (![subview isKindOfClass:MSIMECandidateButton.class] || subview.tag < 0) continue;
         MSIMECandidateButton *button = (MSIMECandidateButton *)subview;
         if (!button.candidateHighlighted) continue;
@@ -1393,6 +1393,8 @@ static NSImage *MSIMECandidateLogoImage() {
     NSUInteger _expandedVisibleRows;
     CGFloat _expandedScrollOffset;
     CGFloat _expandedPendingScrollDelta;
+    CGFloat _expandedViewportHeight;
+    BOOL _expandedScrollsViewport;
     BOOL _focusPending;
     // Dedicated English lives in the Engine session, so a session released for dictionary maintenance takes it along; the reopen puts it back.
     BOOL _resumeDedicatedEnglish;
@@ -2197,6 +2199,8 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedFirstRow = 0;
     _expandedScrollOffset = 0;
     _expandedPendingScrollDelta = 0;
+    _expandedViewportHeight = 0;
+    _expandedScrollsViewport = NO;
 }
 
 // 收起网格时把高亮交回普通候选窗；只导航，不选词或提交组字。
@@ -2259,6 +2263,8 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedCursor = cursor;
     _expandedScrollOffset = 0;
     _expandedPendingScrollDelta = 0;
+    _expandedViewportHeight = 0;
+    _expandedScrollsViewport = NO;
     // 当前高亮所在页是网格的第一行，末页减少显示行数，不向前补行。
     _expandedFirstRow = cursor / columns;
     _expandedVisibleRows = msime::candidate::kExpandedGridVisibleRows;
@@ -2288,6 +2294,8 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedCursor = cursor;
     _expandedScrollOffset = 0;
     _expandedPendingScrollDelta = 0;
+    _expandedViewportHeight = 0;
+    _expandedScrollsViewport = NO;
     return YES;
 }
 
@@ -2314,11 +2322,13 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     const NSUInteger rows = msime::candidate::ExpandedGridRows(count, columns);
     const NSUInteger visibleRows = MIN(rows, MAX((NSUInteger)1, _expandedVisibleRows));
     if (!count || rows <= visibleRows) return;
+    const BOOL hadOffset = _expandedScrollOffset != 0;
     _expandedScrollOffset = 0;
     _expandedPendingScrollDelta = 0;
+    _expandedScrollsViewport = NO;
     if (backwards && _expandedFirstRow > 0) --_expandedFirstRow;
     else if (!backwards && _expandedFirstRow + visibleRows < rows) ++_expandedFirstRow;
-    else return;
+    else if (!hadOffset) return;
     const NSUInteger row = _expandedCursor / columns;
     const NSUInteger column = _expandedCursor % columns;
     const NSUInteger target = row < _expandedFirstRow ? _expandedFirstRow
@@ -2399,6 +2409,7 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     }
     _expandedScrollOffset = 0;
     _expandedPendingScrollDelta = 0;
+    _expandedScrollsViewport = NO;
     _expandedCursor = step.cursor;
     [self renderCandidates];
     return YES;
@@ -7893,7 +7904,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     if (!_candidateMotion) _candidateMotion = [MSIMECandidateMotion new];
     NSMutableArray<NSView *> *rows = [NSMutableArray array];
     MSIMECandidateDecorationView *decoration = nil;
-    for (NSView *subview in MSIMECandidateControlsView(_panel.contentView).subviews) {
+    for (NSView *subview in MSIMECandidateControlSubviews(_panel.contentView)) {
         if ([subview isKindOfClass:MSIMECandidateButton.class] && subview.tag >= 0) [rows addObject:subview];
     }
     for (NSView *subview in _panel.contentView.subviews)
@@ -7920,7 +7931,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 // 高亮在同一个输入串的同一页里换了格位时（方向键、Tab、网格里移动），按皮肤的选中预设装饰新高亮行；高亮本身已经随这一帧同步画好。打字或翻页时 Engine 把高亮放回第一格，那不是选中，不播，与 CandidatePanel 只在 selectCandidateWithIdentifier: 时装饰一致。
 - (void)decorateCandidateSelection:(BOOL)panelWasVisible {
     MSIMECandidateButton *highlighted = nil;
-    for (NSView *subview in MSIMECandidateControlsView(_panel.contentView).subviews)
+    for (NSView *subview in MSIMECandidateControlSubviews(_panel.contentView))
         if ([subview isKindOfClass:MSIMECandidateButton.class] && subview.tag >= 0 && ((MSIMECandidateButton *)subview).candidateHighlighted) {
             highlighted = (MSIMECandidateButton *)subview;
             break;
@@ -8171,7 +8182,14 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         const BOOL listControl = [child isKindOfClass:MSIMECandidatePagerButton.class] ||
             [child isKindOfClass:MSIMECandidateExpandToggleButton.class] ||
             [child.identifier isEqual:@"candidate-pager-divider"];
-        if (!listControl && (![child isKindOfClass:MSIMECandidateButton.class] || child.tag < 0)) frame.origin.y += gap;
+        if (!listControl && ![child.identifier isEqual:@"candidate-expanded-viewport"] &&
+            (![child isKindOfClass:MSIMECandidateButton.class] || child.tag < 0)) frame.origin.y += gap;
+        if ([child.identifier isEqual:@"candidate-expanded-viewport"]) {
+            const NSPoint delta = NSMakePoint(frame.origin.x - child.frame.origin.x, frame.origin.y - child.frame.origin.y);
+            child.bounds = frame;
+            for (NSView *row in child.subviews)
+                row.frame = NSOffsetRect(row.frame, delta.x, delta.y);
+        }
         child.frame = frame;
     }
     // 旧装饰带仍相对卡片顶部；自由挂件则相对新的卡片矩形定位。
@@ -8216,6 +8234,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
                 [controller scrollExpandedCandidatesBackwards:event.scrollingDeltaY > 0];
             return;
         }
+        controller->_expandedScrollsViewport = YES;
         controller->_expandedPendingScrollDelta += event.scrollingDeltaY;
         [controller renderCandidates];
     };
@@ -8268,8 +8287,9 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const NSUInteger cursorRow = _expandedCursor / columns;
     // 来源的 expand_rows 只数首行之后的网格；原生网格把当前页也计入视口。
     const NSUInteger windowRows = MIN(rows, skin.expandRows ? 1 + *skin.expandRows : msime::candidate::kExpandedGridVisibleRows);
-    if (_expandedPendingScrollDelta == 0 && _expandedScrollOffset == 0)
+    if (!_expandedScrollsViewport)
         _expandedFirstRow = msime::candidate::ExpandedGridFirstRow(_expandedFirstRow, cursorRow, rows, windowRows);
+    _expandedFirstRow = MIN(_expandedFirstRow, rows - 1);
 
     // 共享卷轴的收起入口留在候选右侧；原生主题保留首行行号及其开关。
     const BOOL skinToggle = skin.expandPanel.value_or(false) && _appearance.showsCandidateExpandButton;
@@ -8300,50 +8320,64 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
                                minimumWidth:MAX(0.0, MAX(skin.minWidthDip, skin.decorationWidthDip) - canvasExtra)
                                reservesGloss:NO pagerWidth:toggle.column()];
     };
-    // 精确滚动的正 delta 是向上回滚，负 delta 是向下滚动。偏移只在当前首行内保留，跨过行高后推进虚拟窗口。
+    const NSUInteger visibleRows = MIN(windowRows, rows - _expandedFirstRow);
+    if (!_expandedScrollsViewport) _expandedVisibleRows = visibleRows;
+    if (!_expandedScrollsViewport || _expandedViewportHeight <= 0) {
+        _expandedViewportHeight = 0;
+        for (NSUInteger row = _expandedFirstRow; row < _expandedFirstRow + visibleRows; ++row) {
+            if (row > _expandedFirstRow) _expandedViewportHeight += rowGap;
+            _expandedViewportHeight += geometryForRow(row).rowsHeight;
+        }
+    }
+    // 正偏移表示从列表顶部向后浏览；AppKit 的非翻转坐标中，候选应向上移动。
     const CGFloat pendingDelta = _expandedPendingScrollDelta;
     _expandedPendingScrollDelta = 0;
     if (pendingDelta != 0) {
         _expandedScrollOffset += -pendingDelta;
-        while (_expandedScrollOffset >= 0 && _expandedFirstRow + windowRows < rows) {
+        while (_expandedFirstRow + 1 < rows) {
             const CGFloat rowHeight = geometryForRow(_expandedFirstRow).rowsHeight + rowGap;
             if (!(rowHeight > 0) || _expandedScrollOffset < rowHeight) break;
             _expandedScrollOffset -= rowHeight;
             ++_expandedFirstRow;
         }
+        // 到底部时只夹住越界距离，不吞掉仍在视口内的行内偏移。
+        CGFloat remainingHeight = 0;
+        for (NSUInteger row = _expandedFirstRow; row < rows; ++row) {
+            if (row > _expandedFirstRow) remainingHeight += rowGap;
+            remainingHeight += geometryForRow(row).rowsHeight;
+            if (remainingHeight >= _expandedViewportHeight + _expandedScrollOffset) break;
+        }
+        _expandedScrollOffset = MIN(_expandedScrollOffset, remainingHeight - _expandedViewportHeight);
         while (_expandedScrollOffset < 0 && _expandedFirstRow > 0) {
             --_expandedFirstRow;
             const CGFloat rowHeight = geometryForRow(_expandedFirstRow).rowsHeight + rowGap;
             _expandedScrollOffset += rowHeight > 0 ? rowHeight : 0;
         }
-        if (_expandedFirstRow + windowRows >= rows && _expandedScrollOffset > 0)
-            _expandedScrollOffset = 0;
         if (_expandedScrollOffset < 0) _expandedScrollOffset = 0;
     }
-    const NSUInteger visibleRows = MIN(windowRows, rows - _expandedFirstRow);
-    _expandedVisibleRows = visibleRows;
     std::vector<MSIMECandidatePageGeometry> layouts;
-    const BOOL paintsTrailingRow = _expandedScrollOffset > 0 && _expandedFirstRow + visibleRows < rows;
-    const NSUInteger paintedRows = visibleRows + (paintsTrailingRow ? 1 : 0);
-    NSMutableArray<NSArray<NSDictionary *> *> *rowCandidates = [NSMutableArray arrayWithCapacity:paintedRows];
+    NSMutableArray<NSArray<NSDictionary *> *> *rowCandidates = [NSMutableArray array];
     CGFloat width = headerWidth;
-    CGFloat rowsHeight = 0;
-    for (NSUInteger row = _expandedFirstRow; row < _expandedFirstRow + paintedRows; ++row) {
+    CGFloat paintedHeight = 0;
+    for (NSUInteger row = _expandedFirstRow; row < rows; ++row) {
         const NSUInteger start = row * columns;
         NSArray<NSDictionary *> *slice = [_expandedCandidates subarrayWithRange:NSMakeRange(start, MIN(columns, count - start))];
         layouts.push_back(geometryForRow(row));
         [rowCandidates addObject:slice];
         width = MAX(width, layouts.back().width);
-        if (row < _expandedFirstRow + visibleRows) rowsHeight += layouts.back().rowsHeight;
+        if (row > _expandedFirstRow) paintedHeight += rowGap;
+        paintedHeight += layouts.back().rowsHeight;
+        if (paintedHeight >= _expandedViewportHeight + _expandedScrollOffset) break;
     }
     width = ceil(width);
-    if (visibleRows > 1) rowsHeight += (visibleRows - 1) * rowGap;
+    const CGFloat rowsHeight = _expandedViewportHeight;
 
     if (!candidatePanel.wheelPaging) [candidatePanel resetWheelAccumulator];
     // 网格滚轮由 scrollHandler 保留像素偏移，与「滚轮翻页」开关无关；该开关仍只管普通候选窗。
     candidatePanel.mouseWheelEnabled = YES;
-    candidatePanel.hasPreviousPage = _expandedFirstRow > 0;
-    candidatePanel.hasNextPage = _expandedFirstRow + visibleRows < rows;
+    candidatePanel.hasPreviousPage = _expandedFirstRow > 0 || _expandedScrollOffset > 0;
+    candidatePanel.hasNextPage = _expandedFirstRow + layouts.size() < rows ||
+        paintedHeight > rowsHeight + _expandedScrollOffset;
     _panel.opaque = NO;
     _panel.backgroundColor = NSColor.clearColor;
     const CGFloat decorationHeight = decorationImage ? MAX(0.0, skin.decorationTopDip) : 0.0;
@@ -8354,6 +8388,12 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     content.candidateContentView.clipsToBounds = YES;
     content.candidateRowsRect = NSMakeRect(inset, verticalInset, MAX(0.0, width - 2 * inset - toggle.column()), rowsHeight);
     content.candidateRowsTouchTop = headerHeight == 0 && bodyRowGap == 0;
+    NSView *viewport = [[NSView alloc] initWithFrame:NSMakeRect(0, verticalInset, MAX(0.0, width - toggle.column()), rowsHeight)];
+    viewport.identifier = @"candidate-expanded-viewport";
+    // 沿用卡片内坐标，画布留白平移时同步移动视口、bounds 和候选，保持皮肤几何一致。
+    viewport.bounds = viewport.frame;
+    viewport.clipsToBounds = YES;
+    [content.candidateContentView addSubview:viewport];
     CGFloat rowTop = headerBottom - bodyRowGap;
     for (NSUInteger offset = 0; offset < layouts.size(); ++offset) {
         const MSIMECandidatePageGeometry &geometry = layouts[offset];
@@ -8369,8 +8409,8 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
             // 网格的标签是它在网格里的位置，高亮跟网格的光标走，不跟 Engine 那一页的高亮。网格里的候选不挂右键菜单：置顶、删除和固定排位只认当前这一页的候选。
             button.tag = (NSInteger)index;
             button.candidateHighlighted = index == _expandedCursor;
-            button.frame = NSMakeRect(inset + cell.x, rowTop - _expandedScrollOffset - cell.y - cell.height, cell.width, cell.height);
-            [content.candidateContentView addSubview:button];
+            button.frame = NSMakeRect(inset + cell.x, rowTop + _expandedScrollOffset - cell.y - cell.height, cell.width, cell.height);
+            [viewport addSubview:button];
         }
         rowTop -= geometry.rowsHeight + rowGap;
     }
@@ -8790,7 +8830,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 - (void)announceHighlightedCandidate:(BOOL)panelWasVisible {
     if (!panelWasVisible) _announcedCandidate = nil;
     NSString *announcement = nil;
-    for (NSView *subview in MSIMECandidateControlsView(_panel.contentView).subviews)
+    for (NSView *subview in MSIMECandidateControlSubviews(_panel.contentView))
         if ([subview isKindOfClass:MSIMECandidateButton.class] && subview.isAccessibilitySelected) {
             announcement = subview.accessibilityLabel;
             break;
@@ -8865,7 +8905,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     // 九宫格与共享档位由内容绘制，不再叠系统窗口阴影；原生主题保留原有窗口阴影。
     _panel.hasShadow = content.nativeWindowShadowEnabled;
     if (content.liquidGlassActive) msime::mac::ApplyNativeGlassCandidateContrast(tokens, dark);
-    NSArray<MSIMECandidateButton *> *candidateButtons = [content.candidateContentView.subviews filteredArrayUsingPredicate:
+    NSArray<MSIMECandidateButton *> *candidateButtons = [MSIMECandidateControlSubviews(content) filteredArrayUsingPredicate:
         [NSPredicate predicateWithBlock:^BOOL(NSView *view, NSDictionary *_) {
             return ([view isKindOfClass:MSIMECandidateButton.class] ||
                     [view isKindOfClass:MSIMECandidatePreeditField.class]) &&
@@ -8923,7 +8963,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         button.cornerRadius = msime::mac::CandidateRowRadius(tokens, button.candidateHighlighted);
         button.hasCornerRadii = !tokens.explicitItemRadius && skin.layout && skin.layout->itemCornersFollowCard.value_or(false);
         if (button.hasCornerRadii) {
-            const NSRect row = button.frame, area = content.candidateRowsRect;
+            const NSRect row = [button.superview convertRect:button.frame toView:content.candidateContentView], area = content.candidateRowsRect;
             button.cornerRadii = msime::mac::CandidateRowCornerRadii(
                 {NSMinX(row), -NSMaxY(row), NSWidth(row), NSHeight(row)},
                 {NSMinX(area), -NSMaxY(area), NSWidth(area), NSHeight(area)}, content.candidateRowsTouchTop,
@@ -8949,7 +8989,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 
 // 鼠标点网格里的候选。按钮可能是上一次重画留下的，所以它记着的身份要和网格此刻同一位置上的候选一致。
 - (void)selectExpandedCandidate:(MSIMECandidateButton *)button {
-    if (!_activeClient || !_session || !_panel.isVisible || !button.enabled || button.superview != MSIMECandidateControlsView(_panel.contentView) ||
+    if (!_activeClient || !_session || !_panel.isVisible || !button.enabled || ![button isDescendantOf:MSIMECandidateControlsView(_panel.contentView)] ||
         !_expandedCandidates || button.tag < 0 || (NSUInteger)button.tag >= _expandedCandidates.count ||
         ![button.candidateID isEqual:_expandedCandidates[(NSUInteger)button.tag][@"id"]]) return;
     [self selectExpandedCandidateAtIndex:(NSUInteger)button.tag pointer:YES];

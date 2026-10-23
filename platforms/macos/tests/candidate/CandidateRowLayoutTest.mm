@@ -71,7 +71,7 @@
 
 static MSIMECandidateButton *CandidateButton(NSView *content, NSInteger tag)
 {
-    for (NSView *view in MSIMECandidateControlsView(content).subviews)
+    for (NSView *view in MSIMECandidateControlSubviews(content))
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == tag) return (MSIMECandidateButton *)view;
     return nil;
 }
@@ -1162,7 +1162,7 @@ static void TestHostAppearance(BOOL visual)
                         assert(panel.contentView == stableChrome && stableChrome.candidateContentView == stableContent);
                         assert(glass.superview == stableChrome);
                         assert([stableContent.effectiveAppearance.name isEqual:name]);
-                        assert(CandidateButton(stableChrome, 1) != previous && previous.superview == nil);
+                        assert(CandidateButton(stableChrome, 1) != previous && ![previous isDescendantOf:stableContent]);
                         assert([CandidateButton(stableChrome, 1).titleColor isEqual:SkinColor(tokens.text)]);
                     }
                 }
@@ -1257,7 +1257,9 @@ static void TestCanvasHost(const std::filesystem::path &root, NSString *identifi
             assert(std::abs(NSHeight(chrome.bounds) - NSHeight(card) - skin.canvas->outer.top - skin.canvas->outer.bottom) < 0.01);
             assert(NSEqualRects(chrome.candidateContentView.frame, card));
             MSIMECandidateButton *first = CandidateButton(chrome, 0);
-            assert(first.superview == chrome.candidateContentView);
+            assert([first isDescendantOf:chrome.candidateContentView]);
+            if (expanded.boolValue)
+                assert(first.superview.clipsToBounds && [first.superview.identifier isEqual:@"candidate-expanded-viewport"]);
             const CGFloat itemRadius = [identifier isEqual:@"canvas-host"] ? 3.5 : [identifier isEqual:@"green_leaf"] ? 5 : 6;
             assert(std::abs(first.cornerRadius - itemRadius * percent.doubleValue / 100) < 0.01);
             assert(std::abs(NSMinX(first.frame) - padding.left) < 0.01);

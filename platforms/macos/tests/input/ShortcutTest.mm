@@ -3328,16 +3328,29 @@ static void TestGlossSenseTraditionalOutput(MSIMEAppearancePreferences *appearan
 @end
 
 static MSIMECandidateButton *ExpandedGridSubview(NSPanel *panel, NSInteger tag) {
-    for (NSView *view in MSIMECandidateControlsView(panel.contentView).subviews)
+    for (NSView *view in MSIMECandidateControlSubviews(panel.contentView))
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == tag) return (MSIMECandidateButton *)view;
     return nil;
 }
 
 static NSUInteger ExpandedGridHighlightedTag(NSPanel *panel) {
-    for (NSView *view in MSIMECandidateControlsView(panel.contentView).subviews)
+    for (NSView *view in MSIMECandidateControlSubviews(panel.contentView))
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag >= 0 && ((MSIMECandidateButton *)view).candidateHighlighted)
             return (NSUInteger)view.tag;
     return NSNotFound;
+}
+
+static NSEvent *ExpandedGridScrollEvent(CGFloat delta, NSEventPhase phase = NSEventPhaseChanged,
+                                        NSEventPhase momentum = NSEventPhaseNone) {
+    CGEventRef cg = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 1, (int32_t)delta);
+    CGEventSetIntegerValueField(cg, kCGScrollWheelEventIsContinuous, 1);
+    CGEventSetDoubleValueField(cg, kCGScrollWheelEventPointDeltaAxis1, delta);
+    CGEventSetIntegerValueField(cg, kCGScrollWheelEventScrollPhase, phase);
+    CGEventSetIntegerValueField(cg, kCGScrollWheelEventMomentumPhase, momentum);
+    NSEvent *event = [NSEvent eventWithCGEvent:cg];
+    CFRelease(cg);
+    assert(event.hasPreciseScrollingDeltas && event.scrollingDeltaY == delta);
+    return event;
 }
 
 // 普通候选把拼音编辑与选择分开，网格、列表和修饰键各走已有的入口。
@@ -3539,26 +3552,133 @@ static void TestExpandedCandidateGrid() {
     compose();
     assert(press(125) && expanded());
     const CGFloat firstCandidateY = NSMinY(ExpandedGridSubview(panel, 0).frame);
-    [controller setValue:@(-8.0) forKey:@"expandedPendingScrollDelta"];
-    [controller renderCandidates];
+    const CGFloat viewportHeight = panel.frame.size.height;
+    [panel scrollWheel:ExpandedGridScrollEvent(-8, NSEventPhaseBegan)];
     assert([[controller valueForKey:@"expandedScrollOffset"] doubleValue] > 0.0);
-    assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - (firstCandidateY - 8.0)) < 0.01);
-    [controller setValue:@8.0 forKey:@"expandedPendingScrollDelta"];
-    [controller renderCandidates];
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - (firstCandidateY + 8.0)) < 0.01);
+    assert(ExpandedGridSubview(panel, 20));
+    NSView *viewport = ExpandedGridSubview(panel, 0).superview;
+    assert(viewport.clipsToBounds && [viewport.identifier isEqual:@"candidate-expanded-viewport"]);
+    NSView *controls = MSIMECandidateControlsView(panel.contentView);
+    MSIMECandidateButton *top = ExpandedGridSubview(panel, 0);
+    const NSRect topRect = [top convertRect:top.bounds toView:controls];
+    const NSRect viewportRect = [viewport convertRect:viewport.bounds toView:controls];
+    assert(NSMaxY(topRect) > NSMaxY(viewportRect));
+    const NSPoint clippedPoint = NSMakePoint(NSMidX(topRect), NSMaxY(viewportRect) + 1);
+    assert([controls hitTest:[controls convertPoint:clippedPoint toView:controls.superview]] != top);
+    [panel scrollWheel:ExpandedGridScrollEvent(8)];
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
     assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - firstCandidateY) < 0.01);
-    [controller setValue:@(-10000.0) forKey:@"expandedPendingScrollDelta"];
-    [controller renderCandidates];
+    [panel scrollWheel:ExpandedGridScrollEvent(-10000)];
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
-    [controller setValue:@10000.0 forKey:@"expandedPendingScrollDelta"];
+    assert(panel.frame.size.height == viewportHeight);
+    [panel scrollWheel:ExpandedGridScrollEvent(0, NSEventPhaseEnded)];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
     [controller renderCandidates];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    [panel scrollWheel:ExpandedGridScrollEvent(0, NSEventPhaseNone, NSEventPhaseEnded)];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    [panel scrollWheel:ExpandedGridScrollEvent(10000)];
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
+    [panel scrollWheel:ExpandedGridScrollEvent(10000)];
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - firstCandidateY) < 0.01);
+
+    // 跨行前后同一候选的位置连续；反向和惯性事件沿用同一像素视口。
+    [controller closeExpandedCandidates];
+    session.total = 40;
+    compose();
+    assert(press(125) && expanded());
+    const CGFloat rowHeight = NSMinY(ExpandedGridSubview(panel, 0).frame) - NSMinY(ExpandedGridSubview(panel, 4).frame);
+    [panel scrollWheel:ExpandedGridScrollEvent(-(rowHeight - 1))];
+    const CGFloat beforeCrossing = NSMinY(ExpandedGridSubview(panel, 4).frame);
+    [panel scrollWheel:ExpandedGridScrollEvent(-2, NSEventPhaseNone, NSEventPhaseChanged)];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 4).frame) - beforeCrossing - 2) < 0.01);
+    assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue] - 1) < 0.01);
+    [panel scrollWheel:ExpandedGridScrollEvent(2)];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 4).frame) - beforeCrossing) < 0.01);
+    assert(panel.frame.size.height == viewportHeight);
+    assert(!ExpandedGridSubview(panel, 24));
+    assert(press(125) && cursor() == 4);
+    assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
+
+    // 首行折行后高于其它行，跨行仍使用该行真实高度，不假设等高。
+    [controller closeExpandedCandidates];
+    session.total = 200;
+    compose();
+    assert(press(125) && expanded());
+    NSMutableArray<NSDictionary *> *uneven = [[controller valueForKey:@"expandedCandidates"] mutableCopy];
+    NSMutableDictionary *tall = [uneven[0] mutableCopy];
+    tall[@"text"] = [@"合成" stringByPaddingToLength:400 withString:@"合成" startingAtIndex:0];
+    uneven[0] = tall;
+    [controller setValue:uneven forKey:@"expandedCandidates"];
+    [controller renderCandidates];
+    const CGFloat tallHeight = NSMaxY(ExpandedGridSubview(panel, 0).frame) - NSMaxY(ExpandedGridSubview(panel, 4).frame);
+    const CGFloat normalHeight = NSMaxY(ExpandedGridSubview(panel, 4).frame) - NSMaxY(ExpandedGridSubview(panel, 8).frame);
+    assert(tallHeight > normalHeight);
+    [panel scrollWheel:ExpandedGridScrollEvent(-(tallHeight - 1))];
+    const CGFloat beforeUnevenCrossing = NSMinY(ExpandedGridSubview(panel, 4).frame);
+    [panel scrollWheel:ExpandedGridScrollEvent(-2)];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 4).frame) - beforeUnevenCrossing - 2) < 0.01);
+    [panel scrollWheel:ExpandedGridScrollEvent(2)];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 4).frame) - beforeUnevenCrossing) < 0.01);
+
+    // 从触控板切换到普通滚轮仍按行移动，回到顶部时也清掉剩余像素。
+    [controller closeExpandedCandidates];
+    session.total = 24;
+    compose();
+    assert(press(125) && expanded());
+    [panel scrollWheel:ExpandedGridScrollEvent(-8)];
+    CGEventRef lineCG = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitLine, 1, 1);
+    NSEvent *lineEvent = [NSEvent eventWithCGEvent:lineCG];
+    CFRelease(lineCG);
+    assert(!lineEvent.hasPreciseScrollingDeltas);
+    [panel scrollWheel:lineEvent];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
+    assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - firstCandidateY) < 0.01);
+
+    // 从短末页打开也固定当前像素高度，回滚八点不能把窗口扩高一整行。
+    [controller closeExpandedCandidates];
+    session.total = 24;
+    session.highlighted = 20;
+    [controller setValue:[session gridView] forKey:@"view"];
+    [controller renderCandidates];
+    assert(press(125) && expanded());
+    const CGFloat shortHeight = panel.frame.size.height;
+    const CGFloat lastY = NSMinY(ExpandedGridSubview(panel, 20).frame);
+    [panel scrollWheel:ExpandedGridScrollEvent(8)];
+    assert(fabs(panel.frame.size.height - shortHeight) < 0.01);
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 20).frame) - lastY + 8) < 0.01);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 4);
+    [panel scrollWheel:ExpandedGridScrollEvent(0, NSEventPhaseEnded)];
+    assert([[controller valueForKey:@"expandedVisibleRows"] unsignedIntegerValue] == 1);
+    [panel scrollWheel:ExpandedGridScrollEvent(-8)];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 5);
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 20).frame) - lastY) < 0.01);
+    MSIMECandidateButton *stale = ExpandedGridSubview(panel, 20);
+    [controller renderCandidates];
+    const NSUInteger selectedBeforeStale = session.selectAnyCalls;
+    [controller selectExpandedCandidate:stale];
+    assert(session.selectAnyCalls == selectedBeforeStale && expanded());
+    [controller closeExpandedCandidates];
+    session.total = 20;
+    compose();
+    assert(press(125) && expanded());
+    const CGFloat nonScrollingY = NSMinY(ExpandedGridSubview(panel, 0).frame);
+    [panel scrollWheel:ExpandedGridScrollEvent(-8)];
+    assert(!panel.hasPreviousPage && !panel.hasNextPage);
+    assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - nonScrollingY) < 0.01);
     [controller closeExpandedCandidates];
     session.total = 23;
     session.pageSize = 5;
     prefs.pageSize = 5;
+    session.lastCommand = UINT32_MAX;
     compose();
     assert(press(125) && expanded());
 
@@ -11113,6 +11233,11 @@ int main(int argc, char **argv) {
     assert(MSIMEShouldRegisterInputSource(2, registerArguments));
     @autoreleasepool {
         [NSApplication sharedApplication];
+        if (argc == 2 && std::string(argv[1]) == "--expanded-scroll") {
+            TestExpandedCandidateGrid();
+            TestExpandedCandidateGridGeneration();
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--caps-lock") {
             TestCapsLockTap();
             return 0;

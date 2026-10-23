@@ -989,6 +989,7 @@ target_link_libraries(shortcut-test PRIVATE "-framework AudioToolbox")
 target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework AudioToolbox")
 target_link_libraries(shortcut-test PRIVATE "-framework AVFoundation" "-framework Speech" "-framework CoreGraphics" "-framework CoreText" "-framework CoreAudio" "-framework UniformTypeIdentifiers")
 add_test(NAME shortcut COMMAND shortcut-test)
+add_test(NAME shortcut-expanded-scroll COMMAND shortcut-test --expanded-scroll)
 add_test(NAME shortcut-vim-mode COMMAND shortcut-test --vim-mode)
 # Around 25 s locally: several cases wait on real input-source and run-loop round trips, which is past the 20 s CI default.
 # The controllers under test read runtime-options.json from Application Support, so each run gets an empty home of its own: an installed or demo profile on the developer's Mac must not reach into these cases.
@@ -1000,6 +1001,7 @@ file(MAKE_DIRECTORY "${MSIME_SHORTCUT_TEST_HOME}")
 # which is the opposite of what this number is here to do. It is still an order below the leg's own
 # 300 s ctest ceiling, so a genuinely stuck run is still this test's failure rather than the job's.
 set_tests_properties(shortcut PROPERTIES TIMEOUT 240 ENVIRONMENT "CFFIXED_USER_HOME=${MSIME_SHORTCUT_TEST_HOME}")
+set_tests_properties(shortcut-expanded-scroll PROPERTIES TIMEOUT 60 ENVIRONMENT "CFFIXED_USER_HOME=${MSIME_SHORTCUT_TEST_HOME}")
 add_test(NAME shortcut-translations COMMAND shortcut-test --translations)
 set_tests_properties(shortcut-translations PROPERTIES ENVIRONMENT "CFFIXED_USER_HOME=${MSIME_SHORTCUT_TEST_HOME}")
 add_executable(voice-hold-shortcut-test tests/voice/VoiceHoldShortcutTest.mm)
