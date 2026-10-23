@@ -1270,16 +1270,38 @@ static void TestCanvasHost(const std::filesystem::path &root, NSString *identifi
             assert(NSEqualRects(chrome.candidateContentView.frame, card));
             MSIMECandidateButton *first = CandidateButton(chrome, 0);
             assert([first isDescendantOf:chrome.candidateContentView]);
-            if (expanded.boolValue)
+            if (expanded.boolValue) {
                 assert([first.enclosingScrollView isKindOfClass:MSIMEExpandedCandidateScrollView.class] &&
                     first.enclosingScrollView.contentView.clipsToBounds);
+                NSScrollView *viewport = first.enclosingScrollView;
+                assert(fabs(NSMinX(viewport.frame) - padding.left + msime::mac::CandidateInset(skin.tokens)) < 0.01);
+                assert(NSMaxX(viewport.frame) <= NSWidth(card) + positionTolerance);
+                if (!skin.expandPanel.value_or(false)) {
+                    if (fabs(NSMaxX(viewport.frame) - NSWidth(card)) > positionTolerance)
+                        fprintf(stderr, "canvas viewport=%s card=%s padding=%.2f,%.2f inset=%.2f scale=%ld skin=%s\n",
+                            NSStringFromRect(viewport.frame).UTF8String, NSStringFromRect(card).UTF8String,
+                            padding.left, padding.right, msime::mac::CandidateInset(skin.tokens),
+                            (long)percent.integerValue, identifier.UTF8String);
+                    assert(fabs(NSMaxX(viewport.frame) - NSWidth(card)) <= positionTolerance);
+                }
+                assert(fabs(NSWidth(viewport.documentView.frame) - NSWidth(viewport.contentView.bounds)) < 0.01);
+                assert(!viewport.hasHorizontalScroller);
+                viewport.autohidesScrollers = NO;
+                [viewport tile];
+                const NSRect scroller = [viewport.verticalScroller convertRect:viewport.verticalScroller.bounds
+                    toView:chrome.candidateContentView];
+                assert(!NSIsEmptyRect(scroller) && NSMaxX(scroller) <= NSWidth(card) + positionTolerance);
+                for (NSInteger tag = 0; tag < 3; ++tag)
+                    assert(NSMaxX(CandidateFrame(CandidateButton(chrome, tag))) <=
+                        NSMinX(scroller) - 4 * percent.doubleValue / 100 + 0.01);
+            }
             const CGFloat itemRadius = [identifier isEqual:@"canvas-host"] ? 3.5 : [identifier isEqual:@"green_leaf"] ? 5 : 6;
             assert(std::abs(first.cornerRadius - itemRadius * percent.doubleValue / 100) < 0.01);
             assert(std::abs(NSMinX(CandidateFrame(first)) - padding.left) < 0.01);
             CGFloat bottom = CGFLOAT_MAX;
             for (NSInteger tag = 0; tag < 3; ++tag) {
                 MSIMECandidateButton *button = CandidateButton(chrome, tag);
-                assert(button && NSMaxX(CandidateFrame(button)) <= NSWidth(card) - padding.right + 0.01);
+                assert(button && NSMaxX(CandidateFrame(button)) <= NSWidth(card) - padding.right + positionTolerance);
                 bottom = MIN(bottom, NSMinY(CandidateFrame(button)));
             }
             assert(std::abs(bottom - padding.bottom) < 0.01);
@@ -1323,8 +1345,13 @@ static void TestCanvasHost(const std::filesystem::path &root, NSString *identifi
             const auto otherSkin = [appearance candidateWindowSkinForDark:!dark.boolValue];
             assert([first.titleColor isEqual:SkinColor(otherSkin.tokens.selectedText)]);
             if ([identifier isEqual:@"canvas-host"]) {
-                for (NSView *child in chrome.subviews) if ([child.identifier isEqual:@"candidate-canvas-0"])
-                    assert(CGImageGetWidth((__bridge CGImageRef)child.layer.sublayers[4].contents) == (dark.boolValue ? 10 : 8));
+                for (NSView *child in chrome.subviews) if ([child.identifier isEqual:@"candidate-canvas-0"]) {
+                    // 零边框只生成中间贴图，不能假设始终有九个切片。
+                    size_t widest = 0;
+                    for (CALayer *sprite in child.layer.sublayers)
+                        widest = MAX(widest, CGImageGetWidth((__bridge CGImageRef)sprite.contents));
+                    assert(widest == (dark.boolValue ? 10 : 8));
+                }
             }
             chrome.appearance = originalAppearance;
             [controller refreshCandidateSkin];
@@ -1377,7 +1404,7 @@ static void TestCanvasHostFixture()
     std::filesystem::create_directories(root / "canvas-host");
     WriteApng(root / "canvas-host" / "panel.png", 12, 12, 1, 0.1);
     WriteApng(root / "canvas-host" / "panel-light.png", 14, 12, 1, 0.1);
-    {
+    for (int right : {0, 2, 21}) for (int left : {0, 23}) for (bool expand : {false, true}) {
         std::ofstream manifest(root / "canvas-host" / "skin.toml");
         manifest << R"toml(schema_version = 2
 id = "canvas-host"
@@ -1391,16 +1418,17 @@ themes = ["light", "dark"]
 min_width_dip = 240
 line_gap_dip = 9
 item_corner_radius_dip = 3.5
+)toml" << "expand_panel = " << (expand ? "true" : "false") << R"toml(
 [candidate_window.border_image]
 source = "panel.png"
 light_source = "panel-light.png"
 slice_dip = [2]
-width_dip = [4]
+width_dip = [0]
 [candidate_window.content_insets_dip]
 top = 17
-right = 21
+right = )toml" << right << R"toml(
 bottom = 19
-left = 23
+left = )toml" << left << R"toml(
 [candidate_window.outer_insets_dip]
 top = 11
 right = 13
@@ -1434,8 +1462,9 @@ selected_text = "#ffffff"
 selected_bar = "#77ccee"
 )toml";
         assert(manifest.good());
+        manifest.close();
+        TestCanvasHost(root, @"canvas-host", nil);
     }
-    TestCanvasHost(root, @"canvas-host", nil);
     std::filesystem::remove_all(root);
 }
 

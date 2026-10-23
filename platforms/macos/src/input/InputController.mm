@@ -8215,7 +8215,15 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
             [child.identifier isEqual:@"candidate-pager-divider"];
         if (!listControl && ![child.identifier isEqual:@"candidate-expanded-viewport"] &&
             (![child isKindOfClass:MSIMECandidateButton.class] || child.tag < 0)) frame.origin.y += gap;
+        if ([child isKindOfClass:MSIMEExpandedCandidateScrollView.class])
+            frame.size.width = MAX(0.0, frame.size.width + padding.right - inset);
         child.frame = frame;
+        if ([child isKindOfClass:MSIMEExpandedCandidateScrollView.class]) {
+            NSScrollView *viewport = (NSScrollView *)child;
+            [viewport layoutSubtreeIfNeeded];
+            [viewport.documentView setFrameSize:NSMakeSize(NSWidth(viewport.contentView.bounds),
+                NSHeight(viewport.documentView.frame))];
+        }
     }
     // 旧装饰带仍相对卡片顶部；自由挂件则相对新的卡片矩形定位。
     for (NSView *child in content.subviews) if ([child isKindOfClass:MSIMECandidateDecorationView.class]) {

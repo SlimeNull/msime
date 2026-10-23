@@ -18,6 +18,8 @@ Status: implemented
 
 候选区域右侧固定预留 AppKit 常规覆盖式滚动条宽度（向上取整）再加 `4 × candidateScale` 点间隔，滚动条仍覆盖原生视口，但不覆盖候选按钮。宽度分配与屏幕上限先扣这段留白，卡片再将其加回；首行、收起按钮和普通候选窗不挪进滚动区。即使滚动条暂时隐藏也保留留白，避免显示时列宽或窗口跳动；不只增加文字内边距，因为候选背景和鼠标命中区域也不应压到滚动条下。
 
+Canvas 内容边距适配同时调整展开视口及文档宽度。视口已经平移 `padding.left - inset`，其宽度只增加 `padding.right - inset`，右边界因而贴合最终卡片（扣除独立收起按钮列）；不能再叠加左右边距的总差，否则会重复计算左边平移。文档宽度跟随实际裁剪视口，候选列位置及预留滚动条间隔不变。右边距为零或小于基础 inset 时仍保留完整原生滚动条，不让卡片裁掉它，也不引入横向滚动。
+
 采用原生视口替代自定义事件距离累计，保留前述修复的坐标、短末页高度和选词契约。首次展开测量全部行而不是只测量可见行；窗口宽度取所有行的最大宽度，避免滚动时不断改变外框。虚拟化限制的是按钮数量，不宣称消除了全列表测量成本；超长候选列表的进一步优化需要几何缓存或估算策略。
 
 ## Verification
@@ -26,9 +28,11 @@ Status: implemented
 
 普通滚轮回归额外覆盖：精确滚动到底后的无效向下事件与再次重画、末行折行特别高时的向下接管、逐行到达真实底部及反向离开底部；全过程核对固定窗口高度与重画后的像素位置。
 
+Canvas 夹具组合右边距 `0/2/21`、左边距 `0/23`、独立收起按钮开关、`100%/150%` 缩放、横竖布局和明暗主题；强制显示原生滚动条，核对其完整边界、候选间隔、文档与裁剪视口等宽及无横向滚动。卡片受 `NSWindow` 物理像素取整影响，边界断言只允许一个物理像素误差。`candidate-factory-layout` 单独覆盖展开共享列的首列左下外圆角和末列左下内圆角，普通候选的末行圆角与动画路径断言仍保留。
+
 回弹回归检查竖向 `Allowed`、横向 `None`，以及停在底部后新手势仍进入原生滚动入口、原生裁剪视口确实越过底部、虚拟行定位不越界、外框高度不变。手势结束后只等待 AppKit 将视口弹回合法范围，不用程序定位伪造复位。合成事件覆盖越界和复位，但不证明真实触摸板手感，维护者仍需要分别测试连续滚到底和停稳后再向下滑。
 
-原生宿主构建、`shortcut`、`shortcut-expanded-scroll`、`candidate-row-layout`、`candidate-expanded-grid`、`bundle-contents`、`session-smoke`、`text-client`、`desktop-input-session`、`input-source-registration`、`backend-library-load` 十项 CTest 和 `pnpm run verify-notes` 均通过；其中输入会话测试曾出现一次响应计数断言失败，单独复跑通过，不把它记作首次全绿。完整设置应用与输入法安装后签名有效，构建、设置应用内嵌和用户安装目录的核心 UUID 一致。合成事件与安装核验不等于真实触摸板惯性验收。
+原生宿主构建、`shortcut`、`shortcut-expanded-scroll`、`candidate-row-layout`、`candidate-factory-layout`、`candidate-expanded-grid`、`bundle-contents`、`session-smoke`、`text-client`、`desktop-input-session`、`input-source-registration`、`backend-library-load` 十一项 CTest 和 `pnpm run verify-notes` 是这组改动的本地验证范围。输入会话测试曾出现一次响应计数断言失败，单独复跑通过，不把它记作首次全绿。完整设置应用与输入法安装时另核验签名和核心 UUID；合成事件与安装核验不等于真实触摸板惯性验收。
 
 ## Alternatives considered
 
